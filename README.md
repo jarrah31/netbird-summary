@@ -57,6 +57,30 @@ Instead of scrolling through verbose multi-line output for each peer, get a sing
 
 ## Installation
 
+### Quick install (recommended)
+
+Copy and paste this one-liner. It detects your OS, clones the repo from GitHub, symlinks the `netbird-summary` command into the right bin directory, and adds it to your PATH:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jarrah31/netbird-summary/main/install.sh | bash
+```
+
+What it does:
+
+- Clones into `~/.local/share/netbird-summary` (override with `NETBIRD_SUMMARY_DIR`)
+- Symlinks the command into a bin directory chosen for your OS (override with `NETBIRD_SUMMARY_BIN`):
+  - **macOS / Linux** — `/usr/local/bin` if writable, otherwise `~/.local/bin`
+  - **Windows (Git Bash / MSYS2)** — `~/bin`
+- Appends a `PATH` line to your shell profile (`~/.zshrc`, `~/.bashrc`, or `~/.profile`) only if the bin directory isn't already on PATH
+
+Re-running the one-liner later updates an existing install (`git pull`). Requires `git`.
+
+> Prefer to read before you pipe to a shell? View the script first: [install.sh](install.sh).
+
+After installing, open a new terminal (or `source` the profile it mentions) and run `netbird-summary`.
+
+### Manual install
+
 Clone the repository:
 
 ```bash
