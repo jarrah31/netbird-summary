@@ -106,6 +106,19 @@ Ensure `~/bin` is in your PATH. Git Bash typically includes it by default.
 netbird-summary
 ```
 
+## Updating netbird-summary
+
+To pull the latest version of this script from GitHub, run `git pull` inside the cloned repository:
+
+```bash
+cd /path/to/netbird-summary
+git pull
+```
+
+If you set up a symlink during installation, you don't need to do anything else — the symlink points at the script in the repo, so it picks up the update automatically.
+
+> This updates the **netbird-summary** script itself. To update the **NetBird client**, use option `2` in the menu (or `netbird-summary --update`).
+
 ## Usage
 
 Run with no arguments to get an interactive menu (single keypress — no Enter needed):
