@@ -6,18 +6,21 @@ Instead of scrolling through verbose multi-line output for each peer, get a sing
 
 ## Example Output
 
+By default the summary lists **connected** peers in detail, then collapses idle/connecting peers into a count and ends with a stats line:
+
 ```
   NetBird Peer Connection Summary
-  ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-    PEER                                 NETBIRD IP         STATUS       TYPE      ICE (L/R)      LAST HANDSHAKE           LATENCY
-  ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  ● office-server                        100.10.0.1         Connected    P2P       srflx/srflx    Less than a second ago   10.518ms
-  ● home-nas                             100.10.0.2         Connected    P2P       host/host      3 seconds ago            1.204ms
-  ● cloud-vps                            100.10.0.3         Connected    Relayed   relay/relay    12 seconds ago           85.33ms
-  ● laptop-backup                        100.10.0.4         Disconnected —         —              —                        —
-  ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    PEER                           NETBIRD IP       TYPE   ICE (L/R)    REMOTE ENDPOINT       RX / TX         HANDSHAKE LATENCY
+  ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ● office-server                  100.10.0.1       P2P    host/host    203.0.113.10:42508    4.3K/7.2K       37s       15.27ms
+  ● home-nas                       100.10.0.2       P2P    host/prflx   192.168.1.40:51820    4.4K/7.3K       7s        2.81ms
+  ● cloud-vps                      100.10.0.3       Relayed relay/relay  -                     85.0K/64.0K     12s       85.33ms
+  ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-  Legend:  ● P2P (direct)   ● Relayed   ● Disconnected/Connecting
+  + 9 idle / connecting peer(s) hidden.  Show them: menu option 3 or netbird-summary --all
+
+  Legend:  ● P2P (direct)   ● Relayed   ● Idle/Connecting
 
   ICE candidate types (Local/Remote):
     host   — direct LAN address; both sides on same network or no NAT
@@ -26,29 +29,51 @@ Instead of scrolling through verbose multi-line output for each peer, get a sing
     relay  — TURN relay in use; traffic is not peer-to-peer
     -      — not yet negotiated (connecting or relayed with no ICE path)
 
-  This peer IP:       100.10.0.5
-  Peers connected:    3/4
-  Management:         https://api.netbird.io:443
-  Daemon version:     0.36.5
+  This peer IP:   100.10.0.5
+  Peers:          12 total · 3 connected (2 P2P, 1 relayed) · 9 idle/connecting
+  Management:     Connected to https://api.netbird.io:443
+  Daemon version: 0.73.2
+```
+
+Run `netbird-summary --all` (or menu option **3**) to also list the idle/connecting peers with how long they've been in that state:
+
+```
+  Idle / connecting peers  (9)
+  ────────────────────────────────────────────────────────────────────────────────────────────
+    PEER                                           NETBIRD IP       STATUS       FOR
+  ────────────────────────────────────────────────────────────────────────────────────────────
+  ● proxy-d8lh86r95s1s73dm1big-70-123.netbird.se…  100.124.70.123   Connecting   1h7m
+  ● iphone.netbird.selfhosted                      100.124.232.16   Connecting   1h7m
+  ────────────────────────────────────────────────────────────────────────────────────────────
+  FOR = time since the connection state last changed. A large value means the
+  peer has been unreachable (offline), or it is an on-demand / lazy-connection peer.
 ```
 
 ## Columns
 
+**Connected peers table:**
+
 | Column | Description |
 |---|---|
-| **Peer** | Peer hostname |
+| **Peer** | Peer hostname / FQDN (set this in the NetBird dashboard for friendly names) |
 | **NetBird IP** | The peer's WireGuard IP on the NetBird network |
-| **Status** | `Connected` or `Disconnected` |
 | **Type** | `P2P` (direct) or `Relayed` (via TURN server) |
 | **ICE (L/R)** | Local/Remote ICE candidate types used for the connection |
-| **Last Handshake** | Time since the last WireGuard handshake |
+| **Remote Endpoint** | The peer's real IP:port the tunnel connects to |
+| **RX / TX** | Data received / sent over the tunnel |
+| **Handshake** | Time since the last WireGuard handshake |
 | **Latency** | Round-trip latency to the peer |
+
+**Idle / connecting peers** (shown with `--all`) list **Peer**, **NetBird IP**, **Status**, and **For** (how long the peer has been in its current state — a large value usually means it's offline).
 
 ## Status Indicators
 
 - 🟢 **Green** — Connected via P2P (direct)
 - 🟡 **Yellow** — Connected but relayed (traffic goes through a TURN server)
-- 🔴 **Red** — Disconnected or connecting
+- 🔵 **Cyan** — Connected, connection type not yet known
+- 🔴 **Red** — Idle, connecting, or disconnected
+
+> **About `proxy-…` peer names and stuck "Connecting" status:** NetBird auto-generates a hostname (e.g. `proxy-<id>-<ip>`) when a peer registers without a meaningful one. Rename peers in the NetBird dashboard to get friendly names here. A peer that stays "Connecting" with a large **For** time is typically offline/unreachable, or an on-demand (lazy-connection) peer that only links up when there's traffic.
 
 ## Requirements
 
@@ -156,15 +181,19 @@ netbird-summary
   ───────────────
     1  Peer connection summary
     2  Check for client updates
+    3  All peers (incl. idle / connecting)
     q  Quit
 
   Select an option:
 ```
 
+The menu loops after each action until you choose `q`.
+
 Or jump straight to an action with a flag:
 
 ```bash
-netbird-summary -s   # or --summary : show the peer connection summary
+netbird-summary -s   # or --summary : show connected peers
+netbird-summary -a   # or --all     : show all peers, incl. idle / connecting
 netbird-summary -u   # or --update  : check for updates and offer to upgrade
 netbird-summary -h   # or --help    : show usage
 ```

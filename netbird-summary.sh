@@ -22,59 +22,73 @@ trunc() {
 # ════════════════════════════════════════════════════════════════════════════════
 #  Peer connection summary
 # ════════════════════════════════════════════════════════════════════════════════
+# Abbreviate a NetBird duration ("58 minutes, 19 seconds ago") → "58m19s"
+abbr_dur() {
+    local s="$1" out=""
+    case "$s" in
+        ""|"-")             printf '%s' "-";   return ;;
+        Less\ than*|*less\ than*) printf '%s' "<1s"; return ;;
+    esac
+    [[ "$s" =~ ([0-9]+)\ day    ]] && out+="${BASH_REMATCH[1]}d"
+    [[ "$s" =~ ([0-9]+)\ hour   ]] && out+="${BASH_REMATCH[1]}h"
+    [[ "$s" =~ ([0-9]+)\ minute ]] && out+="${BASH_REMATCH[1]}m"
+    [[ "$s" =~ ([0-9]+)\ second ]] && out+="${BASH_REMATCH[1]}s"
+    [[ -z "$out" ]] && out="$s"
+    printf '%s' "$out"
+}
+
+# Abbreviate "3.8 KiB/6.3 KiB" → "3.8K/6.3K"
+abbr_bytes() {
+    local s="$1"
+    [[ -z "$s" || "$s" == "-" ]] && { printf '%s' "-"; return; }
+    s="${s// /}"      # drop spaces
+    s="${s//iB/}"     # KiB→K, MiB→M, GiB→G (a lone B stays B)
+    printf '%s' "$s"
+}
+
+# Round a latency value ("5.376674ms") → "5.38ms"; pass through if unparsable
+abbr_lat() {
+    local s="$1" num rest
+    [[ -z "$s" || "$s" == "-" ]] && { printf '%s' "-"; return; }
+    num="${s%%[!0-9.]*}"
+    rest="${s#"$num"}"
+    if [[ -n "$num" && -n "$rest" ]]; then
+        printf '%.2f%s' "$num" "$rest"
+    else
+        printf '%s' "$s"
+    fi
+}
+
 show_summary() {
+    local mode="${1:-}"   # "all" → also list idle / connecting peers
     local raw
     if ! raw=$(netbird status --detail 2>&1); then
         printf 'Error running netbird status --detail:\n%s\n' "$raw" >&2
         return 1
     fi
 
-    # ── Column widths ───────────────────────────────────────────────────────────
-    local cN=36 cI=18 cS=12 cT=9 cC=14 cH=24 cL=12
-
-    # ── Row buffer (indexed array — bash 3.2 safe) ──────────────────────────────
-    local rows=()
-
-    # ── Current peer state ──────────────────────────────────────────────────────
-    local p_name="" p_ip="—" p_status="—" p_type="—"
-    local p_ice="—" p_shake="—" p_latency="—"
-
-    flush_peer() {
-        [[ -z "$p_name" ]] && return
-
-        local st="$p_status" ty="$p_type" ind
-
-        if   [[ "$st" == Connected && "$ty" == P2P     ]]; then ind="${GREEN}●${RESET}"
-        elif [[ "$st" == Connected && "$ty" == Relayed  ]]; then ind="${YELLOW}●${RESET}"
-        elif [[ "$st" == Connected                       ]]; then ind="${CYAN}●${RESET}"
-        else                                                       ind="${RED}●${RESET}"
-        fi
-
-        rows+=("$(printf '  %s %-'"${cN}"'s %-'"${cI}"'s %-'"${cS}"'s %-'"${cT}"'s %-'"${cC}"'s %-'"${cH}"'s %s' \
-            "$ind" \
-            "$(trunc "$p_name"    $cN)" \
-            "$(trunc "$p_ip"      $cI)" \
-            "$(trunc "$st"        $cS)" \
-            "$(trunc "$ty"        $cT)" \
-            "$(trunc "$p_ice"     $cC)" \
-            "$(trunc "$p_shake"   $cH)" \
-            "$(trunc "$p_latency" $cL)")")
-    }
+    # ── Per-peer parallel arrays (bash 3.2 safe) ────────────────────────────────
+    local names=() ips=() statuses=() types=() ices=() ends=() txs=() shakes=() lats=() fors=()
+    local p_name p_ip p_status p_type p_ice p_end p_tx p_shake p_lat p_for
 
     reset_peer() {
-        p_name=""
-        p_ip="—"; p_status="—"; p_type="—"
-        p_ice="—"; p_shake="—"; p_latency="—"
+        p_name=""; p_ip="-"; p_status="-"; p_type="-"; p_ice="-"
+        p_end="-"; p_tx="-"; p_shake="-"; p_lat="-"; p_for="-"
     }
+    flush_peer() {
+        [[ -z "$p_name" ]] && return
+        names+=("$p_name");   ips+=("$p_ip");       statuses+=("$p_status")
+        types+=("$p_type");   ices+=("$p_ice");     ends+=("$p_end")
+        txs+=("$p_tx");       shakes+=("$p_shake"); lats+=("$p_lat"); fors+=("$p_for")
+    }
+    reset_peer
 
     # ── Parse line by line ──────────────────────────────────────────────────────
     local line
     while IFS= read -r line; do
         # Peer header: one leading space, name (not starting with - or :), ends with colon
         if [[ "$line" =~ ^[[:space:]]([^[:space:]:-][^:]*):$ ]]; then
-            flush_peer
-            reset_peer
-            p_name="${BASH_REMATCH[1]}"
+            flush_peer; reset_peer; p_name="${BASH_REMATCH[1]}"
 
         elif [[ -z "$p_name" ]]; then
             continue
@@ -88,51 +102,113 @@ show_summary() {
         elif [[ "$line" =~ ^[[:space:]]+Connection\ type:\ (.+)$ ]]; then
             p_type="${BASH_REMATCH[1]}"
 
+        elif [[ "$line" =~ ^[[:space:]]+ICE\ candidate\ endpoints\ \(Local/Remote\):\ (.+)$ ]]; then
+            p_end="${BASH_REMATCH[1]#*/}"   # remote half (after the slash)
+
         elif [[ "$line" =~ ^[[:space:]]+ICE\ candidate\ \(Local/Remote\):\ (.+)$ ]]; then
             p_ice="${BASH_REMATCH[1]}"
+
+        elif [[ "$line" =~ ^[[:space:]]+Last\ connection\ update:\ (.+)$ ]]; then
+            p_for="${BASH_REMATCH[1]}"
 
         elif [[ "$line" =~ ^[[:space:]]+Last\ [Ww]ire[Gg]uard\ handshake:\ (.+)$ ]]; then
             p_shake="${BASH_REMATCH[1]}"
 
+        elif [[ "$line" =~ ^[[:space:]]+Transfer\ status\ \(received/sent\)\ (.+)$ ]]; then
+            p_tx="${BASH_REMATCH[1]}"
+
         elif [[ "$line" =~ ^[[:space:]]+Latency:\ (.+)$ ]]; then
-            p_latency="${BASH_REMATCH[1]}"
+            p_lat="${BASH_REMATCH[1]}"
 
         elif [[ "$line" =~ ^(Events:|OS:) ]]; then
-            flush_peer
-            reset_peer
+            flush_peer; reset_peer
         fi
 
     done <<< "$raw"
     flush_peer  # catch last peer if output ended without Events:/OS:
 
-    # ── Build separator ─────────────────────────────────────────────────────────
-    local total=$(( cN + cI + cS + cT + cC + cH + cL + 10 ))
-    local SEP
-    SEP=$(printf '─%.0s' $(seq 1 "$total"))
+    # ── Tally ───────────────────────────────────────────────────────────────────
+    local count=${#names[@]} connected=0 p2p=0 relayed=0 idle=0 i
+    for ((i=0; i<count; i++)); do
+        if [[ "${statuses[$i]}" == Connected ]]; then
+            connected=$((connected+1))
+            case "${types[$i]}" in
+                P2P)     p2p=$((p2p+1)) ;;
+                Relayed) relayed=$((relayed+1)) ;;
+            esac
+        else
+            idle=$((idle+1))
+        fi
+    done
 
-    # ── Print header ────────────────────────────────────────────────────────────
+    # ── Connected peers table ───────────────────────────────────────────────────
+    local cN=30 cI=16 cT=6 cE=12 cP=21 cX=15 cH=9 cL=11
+    local tot=$(( cN + cI + cT + cE + cP + cX + cH + cL + 11 ))
+    local SEP; SEP=$(printf '─%.0s' $(seq 1 "$tot"))
+    local rowfmt='  %s %-'"$cN"'s %-'"$cI"'s %-'"$cT"'s %-'"$cE"'s %-'"$cP"'s %-'"$cX"'s %-'"$cH"'s %s\n'
+
     printf '\n  %s%sNetBird Peer Connection Summary%s\n' "$BOLD" "$CYAN" "$RESET"
     printf '  %s%s%s\n' "$BOLD" "$SEP" "$RESET"
-    printf '  %s  %-'"${cN}"'s %-'"${cI}"'s %-'"${cS}"'s %-'"${cT}"'s %-'"${cC}"'s %-'"${cH}"'s %s%s\n' \
+    printf '  %s  %-'"$cN"'s %-'"$cI"'s %-'"$cT"'s %-'"$cE"'s %-'"$cP"'s %-'"$cX"'s %-'"$cH"'s %s%s\n' \
         "$BOLD" \
-        "PEER" "NETBIRD IP" "STATUS" "TYPE" "ICE (L/R)" "LAST HANDSHAKE" "LATENCY" \
+        "PEER" "NETBIRD IP" "TYPE" "ICE (L/R)" "REMOTE ENDPOINT" "RX / TX" "HANDSHAKE" "LATENCY" \
         "$RESET"
     printf '  %s%s%s\n' "$BOLD" "$SEP" "$RESET"
 
-    # ── Print rows ──────────────────────────────────────────────────────────────
-    if (( ${#rows[@]} == 0 )); then
-        printf '  %s  No peers found.%s\n' "$DIM" "$RESET"
+    if (( connected == 0 )); then
+        printf '  %s  No connected peers.%s\n' "$DIM" "$RESET"
     else
-        local row
-        for row in "${rows[@]}"; do
-            printf '%s\n' "$row"
+        local ind
+        for ((i=0; i<count; i++)); do
+            [[ "${statuses[$i]}" == Connected ]] || continue
+            if   [[ "${types[$i]}" == P2P     ]]; then ind="${GREEN}●${RESET}"
+            elif [[ "${types[$i]}" == Relayed ]]; then ind="${YELLOW}●${RESET}"
+            else                                       ind="${CYAN}●${RESET}"
+            fi
+            printf "$rowfmt" "$ind" \
+                "$(trunc "${names[$i]}"                   $cN)" \
+                "$(trunc "${ips[$i]}"                     $cI)" \
+                "$(trunc "${types[$i]}"                   $cT)" \
+                "$(trunc "${ices[$i]}"                    $cE)" \
+                "$(trunc "${ends[$i]}"                    $cP)" \
+                "$(trunc "$(abbr_bytes "${txs[$i]}")"     $cX)" \
+                "$(trunc "$(abbr_dur   "${shakes[$i]}")"  $cH)" \
+                "$(trunc "$(abbr_lat   "${lats[$i]}")"    $cL)"
         done
     fi
-
     printf '  %s%s%s\n' "$BOLD" "$SEP" "$RESET"
 
+    # ── Idle / connecting peers ─────────────────────────────────────────────────
+    if (( idle > 0 )); then
+        if [[ "$mode" == all ]]; then
+            local dN=46 dI=16 dS=12
+            local dtot=$(( dN + dI + dS + 12 + 8 ))
+            local DSEP; DSEP=$(printf '─%.0s' $(seq 1 "$dtot"))
+            printf '\n  %s%sIdle / connecting peers%s  %s(%d)%s\n' "$BOLD" "$CYAN" "$RESET" "$DIM" "$idle" "$RESET"
+            printf '  %s%s%s\n' "$BOLD" "$DSEP" "$RESET"
+            printf '  %s  %-'"$dN"'s %-'"$dI"'s %-'"$dS"'s %s%s\n' \
+                "$BOLD" "PEER" "NETBIRD IP" "STATUS" "FOR" "$RESET"
+            printf '  %s%s%s\n' "$BOLD" "$DSEP" "$RESET"
+            for ((i=0; i<count; i++)); do
+                [[ "${statuses[$i]}" == Connected ]] && continue
+                printf '  %s %-'"$dN"'s %-'"$dI"'s %-'"$dS"'s %s\n' \
+                    "${RED}●${RESET}" \
+                    "$(trunc "${names[$i]}"    $dN)" \
+                    "$(trunc "${ips[$i]}"      $dI)" \
+                    "$(trunc "${statuses[$i]}" $dS)" \
+                    "$(abbr_dur "${fors[$i]}")"
+            done
+            printf '  %s%s%s\n' "$BOLD" "$DSEP" "$RESET"
+            printf '  %sFOR = time since the connection state last changed. A large value means the\n' "$DIM"
+            printf '  peer has been unreachable (offline), or it is an on-demand / lazy-connection peer.%s\n' "$RESET"
+        else
+            printf '\n  %s+ %d idle / connecting peer(s) hidden.%s  Show them: menu option %s3%s or %snetbird-summary --all%s\n' \
+                "$DIM" "$idle" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET"
+        fi
+    fi
+
     # ── Legend & ICE reference ──────────────────────────────────────────────────
-    printf '\n  %sLegend:%s  %s● P2P (direct)%s   %s● Relayed%s   %s● Disconnected/Connecting%s\n' \
+    printf '\n  %sLegend:%s  %s● P2P (direct)%s   %s● Relayed%s   %s● Idle/Connecting%s\n' \
         "$DIM" "$RESET" "$GREEN" "$RESET" "$YELLOW" "$RESET" "$RED" "$RESET"
 
     printf '\n  %sICE candidate types (Local/Remote):%s\n' "$BOLD" "$RESET"
@@ -143,20 +219,20 @@ show_summary() {
     printf '  %s  -%s      — not yet negotiated (connecting or relayed with no ICE path)\n' "$RED"    "$RESET"
 
     # ── System info ─────────────────────────────────────────────────────────────
-    local nb_ip peers_cnt profile daemon mgmt
-    nb_ip=$(     awk '/^NetBird IP:/{print $3}'                    <<< "$raw")
-    peers_cnt=$( awk '/^Peers count:/{print $3}'                   <<< "$raw")
-    profile=$(   awk '/^Profile:/{print $2}'                       <<< "$raw")
-    daemon=$(    awk '/^Daemon version:/{print $3}'                 <<< "$raw")
-    mgmt=$(      awk '/^Management:/{$1=""; sub(/^ /,""); print}'  <<< "$raw")
+    local nb_ip profile daemon mgmt
+    nb_ip=$(   awk '/^NetBird IP:/{print $3}'                   <<< "$raw")
+    profile=$( awk '/^Profile:/{print $2}'                      <<< "$raw")
+    daemon=$(  awk '/^Daemon version:/{print $3}'                <<< "$raw")
+    mgmt=$(    awk '/^Management:/{$1=""; sub(/^ /,""); print}' <<< "$raw")
 
     printf '\n'
-    printf '  %s%-20s%s%s\n' "$BOLD" "This peer IP:"    "$RESET" "$nb_ip"
-    printf '  %s%-20s%s%s\n' "$BOLD" "Peers connected:" "$RESET" "${peers_cnt:-unknown}"
+    printf '  %s%-16s%s%s\n' "$BOLD" "This peer IP:" "$RESET" "$nb_ip"
+    printf '  %s%-16s%s%d total · %s%d connected%s (%d P2P, %d relayed) · %s%d idle/connecting%s\n' \
+        "$BOLD" "Peers:" "$RESET" "$count" "$GREEN" "$connected" "$RESET" "$p2p" "$relayed" "$YELLOW" "$idle" "$RESET"
     [[ -n "$profile" ]] &&
-    printf '  %s%-20s%s%s\n' "$BOLD" "Profile:"         "$RESET" "$profile"
-    printf '  %s%-20s%s%s\n' "$BOLD" "Management:"      "$RESET" "$mgmt"
-    printf '  %s%-20s%s%s\n' "$BOLD" "Daemon version:"  "$RESET" "$daemon"
+    printf '  %s%-16s%s%s\n' "$BOLD" "Profile:"        "$RESET" "$profile"
+    printf '  %s%-16s%s%s\n' "$BOLD" "Management:"     "$RESET" "$mgmt"
+    printf '  %s%-16s%s%s\n' "$BOLD" "Daemon version:" "$RESET" "$daemon"
     printf '\n'
 }
 
@@ -340,10 +416,11 @@ check_update() {
 show_help() {
     printf 'netbird-summary — NetBird peer summary and update checker\n\n'
     printf 'Usage:\n'
-    printf '  netbird-summary             Interactive menu (or summary when piped)\n'
-    printf '  netbird-summary -s, --summary   Show the peer connection summary\n'
-    printf '  netbird-summary -u, --update    Check for updates and offer to upgrade\n'
-    printf '  netbird-summary -h, --help      Show this help\n'
+    printf '  netbird-summary              Interactive menu (or summary when piped)\n'
+    printf '  netbird-summary -s, --summary    Show connected peers\n'
+    printf '  netbird-summary -a, --all        Show all peers, incl. idle / connecting\n'
+    printf '  netbird-summary -u, --update     Check for updates and offer to upgrade\n'
+    printf '  netbird-summary -h, --help       Show this help\n'
 }
 
 show_menu() {
@@ -353,6 +430,7 @@ show_menu() {
         printf '  %s───────────────%s\n' "$BOLD" "$RESET"
         printf '    %s1%s  Peer connection summary\n' "$BOLD" "$RESET"
         printf '    %s2%s  Check for client updates\n' "$BOLD" "$RESET"
+        printf '    %s3%s  All peers (incl. idle / connecting)\n' "$BOLD" "$RESET"
         printf '    %sq%s  Quit\n' "$BOLD" "$RESET"
         printf '\n  Select an option: '
 
@@ -362,6 +440,7 @@ show_menu() {
         case "$choice" in
             1)         show_summary ;;
             2)         check_update ;;
+            3)         show_summary all ;;
             q|Q|$'\e')  printf '\n'; return 0 ;;
             *)         printf '\n  %sInvalid option.%s\n' "$RED" "$RESET" ;;
         esac
@@ -371,7 +450,8 @@ show_menu() {
 case "${1:-}" in
     -h|--help|help)        show_help ;;
     -u|--update|update)    check_update ;;
-    -s|--summary|summary)  show_summary ;;
+    -a|--all)              show_summary all ;;
+    -s|--summary|summary)  show_summary "${2:-}" ;;
     "")
         # Interactive terminal → menu; piped/non-interactive → summary (back-compat)
         if [[ -t 0 && -t 1 ]]; then
