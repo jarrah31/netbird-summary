@@ -188,17 +188,37 @@ version_compare() {
     if [[ "$greatest" == "$b" ]]; then echo older; else echo newer; fi
 }
 
-# Detect how netbird was installed → "apt", "dnf", "yum", or "script"
+# Is the official NetBird APT repo configured?
+netbird_apt_repo_present() {
+    grep -rqs 'pkgs\.netbird\.io' \
+        /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null
+}
+
+# Is the official NetBird YUM/DNF repo configured?
+netbird_yum_repo_present() {
+    grep -rqs 'pkgs\.netbird\.io' /etc/yum.repos.d/ 2>/dev/null
+}
+
+# Detect how netbird should be updated → "apt", "dnf", "yum", or "script".
+#
+# We trust a package manager only when it BOTH manages the netbird package and
+# has the official NetBird repo configured (so it can actually fetch the new
+# version). Otherwise — including a manually-installed .deb/.rpm with no repo —
+# we fall back to the official install script, which re-adds the repo and
+# self-heals. Note: the install script itself installs via apt/yum/dnf on those
+# distros, so a package-managed install is the normal, expected result.
 detect_install_method() {
-    if command -v dpkg >/dev/null 2>&1 && dpkg -s netbird >/dev/null 2>&1; then
+    if command -v dpkg >/dev/null 2>&1 && dpkg -s netbird >/dev/null 2>&1 \
+       && netbird_apt_repo_present; then
         echo apt
-    elif command -v rpm >/dev/null 2>&1 && rpm -q netbird >/dev/null 2>&1; then
+    elif command -v rpm >/dev/null 2>&1 && rpm -q netbird >/dev/null 2>&1 \
+         && netbird_yum_repo_present; then
         if   command -v dnf >/dev/null 2>&1; then echo dnf
         elif command -v yum >/dev/null 2>&1; then echo yum
         else echo script
         fi
     else
-        echo script   # binary install via the official install.sh
+        echo script   # binary install, or package present without the repo
     fi
 }
 

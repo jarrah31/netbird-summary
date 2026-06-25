@@ -155,10 +155,12 @@ If a newer version is available **on Linux**, the script offers to upgrade you. 
 
 | Detected install | Update command used |
 |---|---|
-| APT package (`dpkg`) | `sudo apt-get update && sudo apt-get install -y netbird` |
-| RPM package (`dnf`) | `sudo dnf install -y netbird` |
-| RPM package (`yum`) | `sudo yum install -y netbird` |
-| Binary install script | `netbird down` → official [`install.sh --update`](https://docs.netbird.io/get-started/install/linux#updating) → `netbird up` |
+| APT package + NetBird repo | `sudo apt-get update && sudo apt-get install -y netbird` |
+| RPM package + NetBird repo (`dnf`) | `sudo dnf install -y netbird` |
+| RPM package + NetBird repo (`yum`) | `sudo yum install -y netbird` |
+| Anything else | `netbird down` → official [`install.sh --update`](https://docs.netbird.io/get-started/install/linux#updating) → `netbird up` |
+
+A package manager is only used when it **both** manages the `netbird` package **and** has the official NetBird repo (`pkgs.netbird.io`) configured — so it can actually fetch the new version. This is the normal case for the `curl … install.sh | sh` one-liner, which adds that repo and installs via apt/yum/dnf on supported distros. Anything else (a manually-installed `.deb`/`.rpm` without the repo, or a plain binary install) falls back to the official install script, which re-adds the repo and self-heals.
 
 The exact commands are shown and require a single-key `y` confirmation before anything runs. `sudo` is used automatically when you're not root.
 
