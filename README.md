@@ -1,6 +1,6 @@
 # netbird-summary
 
-A bash script that parses `netbird status --detail` and displays a concise, color-coded peer connection summary table.
+A bash script that parses `netbird status --detail` and displays a concise, color-coded peer connection summary table — and checks for (and installs) NetBird client updates.
 
 Instead of scrolling through verbose multi-line output for each peer, get a single table showing every peer's status at a glance.
 
@@ -108,13 +108,50 @@ netbird-summary
 
 ## Usage
 
-Simply run the script — no arguments needed:
+Run with no arguments to get an interactive menu (single keypress — no Enter needed):
 
 ```bash
 netbird-summary
 ```
 
-The script calls `netbird status --detail` and formats the output into a summary table.
+```
+  NetBird Summary
+  ───────────────
+    1  Peer connection summary
+    2  Check for client updates
+    q  Quit
+
+  Select an option:
+```
+
+Or jump straight to an action with a flag:
+
+```bash
+netbird-summary -s   # or --summary : show the peer connection summary
+netbird-summary -u   # or --update  : check for updates and offer to upgrade
+netbird-summary -h   # or --help    : show usage
+```
+
+When the output is piped or run non-interactively (e.g. from cron), the menu is skipped and the summary is printed directly — so existing scripts and symlinks keep working.
+
+## Checking for updates
+
+Option **2** (or `--update`) compares your installed client version (`netbird version`) against the latest release published on [NetBird's GitHub](https://github.com/netbirdio/netbird/releases) and tells you whether you're up to date.
+
+If a newer version is available **on Linux**, the script offers to upgrade you. It detects how NetBird was installed and uses the matching method:
+
+| Detected install | Update command used |
+|---|---|
+| APT package (`dpkg`) | `sudo apt-get update && sudo apt-get install -y netbird` |
+| RPM package (`dnf`) | `sudo dnf install -y netbird` |
+| RPM package (`yum`) | `sudo yum install -y netbird` |
+| Binary install script | `netbird down` → official [`install.sh --update`](https://docs.netbird.io/get-started/install/linux#updating) → `netbird up` |
+
+The exact commands are shown and require a single-key `y` confirmation before anything runs. `sudo` is used automatically when you're not root.
+
+On macOS the update check still reports your version status, but upgrades are left to your original install method (e.g. `brew upgrade netbird` or the `.pkg` installer).
+
+> **Note:** the GitHub version check is only performed when you choose the update option — normal summary runs stay fast and make no network calls.
 
 ## License
 
