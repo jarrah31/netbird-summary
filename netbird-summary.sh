@@ -347,23 +347,25 @@ show_help() {
 }
 
 show_menu() {
-    printf '\n  %s%sNetBird Summary%s\n' "$BOLD" "$CYAN" "$RESET"
-    printf '  %s───────────────%s\n' "$BOLD" "$RESET"
-    printf '    %s1%s  Peer connection summary\n' "$BOLD" "$RESET"
-    printf '    %s2%s  Check for client updates\n' "$BOLD" "$RESET"
-    printf '    %sq%s  Quit\n' "$BOLD" "$RESET"
-    printf '\n  Select an option: '
-
     local choice
-    read -rsn1 choice
-    printf '%s\n' "$choice"
+    while true; do
+        printf '\n  %s%sNetBird Summary%s\n' "$BOLD" "$CYAN" "$RESET"
+        printf '  %s───────────────%s\n' "$BOLD" "$RESET"
+        printf '    %s1%s  Peer connection summary\n' "$BOLD" "$RESET"
+        printf '    %s2%s  Check for client updates\n' "$BOLD" "$RESET"
+        printf '    %sq%s  Quit\n' "$BOLD" "$RESET"
+        printf '\n  Select an option: '
 
-    case "$choice" in
-        1)        show_summary ;;
-        2)        check_update ;;
-        q|Q|$'\e') printf '\n' ;;
-        *)        printf '\n  %sInvalid option.%s\n' "$RED" "$RESET"; return 1 ;;
-    esac
+        read -rsn1 choice
+        printf '%s\n' "$choice"
+
+        case "$choice" in
+            1)         show_summary ;;
+            2)         check_update ;;
+            q|Q|$'\e')  printf '\n'; return 0 ;;
+            *)         printf '\n  %sInvalid option.%s\n' "$RED" "$RESET" ;;
+        esac
+    done
 }
 
 case "${1:-}" in
