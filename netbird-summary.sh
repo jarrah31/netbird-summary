@@ -544,7 +544,11 @@ self_update_check() {
     printf '  %s%s%s\n' "$DIM" "$repo" "$RESET"
     if confirm "Update netbird-summary now (git pull)?"; then
         if git -C "$repo" pull --ff-only --quiet; then
-            printf '  %s✓ Updated. Restart netbird-summary to run the new version.%s\n' "$GREEN" "$RESET"
+            printf '  %s✓ Updated to the latest version.%s\n' "$GREEN" "$RESET"
+            printf '  %sThe copy already running in memory is the previous version and a shell\n' "$DIM"
+            printf '  script can'\''t reload itself mid-run, so netbird-summary will now quit.\n'
+            printf '  Re-run it to use the new version.%s\n' "$RESET"
+            exit 0
         else
             printf '  %s✗ Update failed — you may have local changes. Run: git -C %s pull%s\n' "$RED" "$repo" "$RESET"
         fi
@@ -567,8 +571,9 @@ _load_api_key() {
 }
 
 # Prompt for an API key, save it to disk (mode 600), set $NB_API_KEY.
+# Optional $1 overrides the header line (e.g. when replacing a rejected key).
 _prompt_api_key() {
-    printf '\n  %sNetBird API key not found.%s\n' "$YELLOW" "$RESET"
+    printf '\n  %s%s%s\n' "$YELLOW" "${1:-NetBird API key not found.}" "$RESET"
     printf '  Generate one in the dashboard under Settings → API Keys.\n'
     printf '  Paste your API key: '
     read -r NB_API_KEY
@@ -622,6 +627,15 @@ _nb_api() { curl -fsSL --max-time 15 \
     -H "Accept: application/json" \
     "${NB_API_BASE}${1}"; }
 
+# Authenticated GET that writes the body to file $2 and prints the HTTP status
+# code (or "000" when no response was received). Used as an auth probe so an
+# expired/revoked key (401/403) can be told apart from other failures.
+_nb_api_to() { curl -sS --max-time 15 \
+    -H "Authorization: Token $NB_API_KEY" \
+    -H "Accept: application/json" \
+    -o "$2" -w '%{http_code}' \
+    "${NB_API_BASE}${1}" 2>/dev/null; }
+
 show_access_policy() {
     _require_api_key || return 1
 
@@ -650,14 +664,38 @@ show_access_policy() {
     local tmpdir
     tmpdir=$(mktemp -d 2>/dev/null) || { printf '  %sCould not create temp directory.%s\n' "$RED" "$RESET"; return 1; }
 
+    # The first call doubles as an auth probe. If the key was rejected
+    # (expired/revoked), discard it and let the user enter a fresh one, then retry.
+    local code
+    code=$(_nb_api_to "/peers" "$tmpdir/peers.json")
+    if [[ "$code" == 401 || "$code" == 403 ]]; then
+        printf '\n  %sThe NetBird API key was rejected (HTTP %s) — it may have expired or been revoked.%s\n' \
+            "$YELLOW" "$code" "$RESET"
+        rm -f "$NB_API_KEY_FILE"
+        _prompt_api_key "Enter a replacement NetBird API key:" || { rm -rf "$tmpdir"; return 1; }
+        code=$(_nb_api_to "/peers" "$tmpdir/peers.json")
+    fi
+    if [[ "$code" != 200 ]]; then
+        if [[ "$code" == 000 ]]; then
+            printf '  %sCould not reach the NetBird API at %s.%s\n' "$RED" "$NB_API_BASE" "$RESET"
+            printf '  %sCheck the server URL and your network connection.%s\n' "$DIM" "$RESET"
+        elif [[ "$code" == 401 || "$code" == 403 ]]; then
+            printf '  %sThe NetBird API key was rejected again (HTTP %s).%s\n' "$RED" "$code" "$RESET"
+        else
+            printf '  %sThe NetBird API returned an unexpected status (HTTP %s).%s\n' "$RED" "$code" "$RESET"
+        fi
+        printf '  %sTo reset stored credentials delete: %s%s\n' "$DIM" "$NB_CONFIG_DIR" "$RESET"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
     local ok=0
-    _nb_api "/peers"              > "$tmpdir/peers.json"     2>/dev/null && \
     _nb_api "/groups"             > "$tmpdir/groups.json"    2>/dev/null && \
     _nb_api "/policies"           > "$tmpdir/policies.json"  2>/dev/null && \
     _nb_api "/networks/resources" > "$tmpdir/res_list.json"  2>/dev/null && ok=1
 
     if (( ok == 0 )); then
-        printf '  %sAPI call failed — verify your key and server URL.%s\n' "$RED" "$RESET"
+        printf '  %sAPI call failed while fetching groups/policies/resources.%s\n' "$RED" "$RESET"
         printf '  %sTo reset stored credentials delete: %s%s\n' "$DIM" "$NB_CONFIG_DIR" "$RESET"
         rm -rf "$tmpdir"
         return 1
