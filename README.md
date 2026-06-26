@@ -176,7 +176,7 @@ When run interactively, `netbird-summary` also checks GitHub for newer commits o
   Update netbird-summary now (git pull)? [y/N]
 ```
 
-- The check is **throttled to at most once per day** and runs only when the script lives in a git checkout (i.e. installed via the one-liner or `git clone`).
+- The check is **throttled to at most once per day** and runs only when the script lives in a git checkout (i.e. installed via the one-liner or `git clone`). Press **`u`** at the action prompt to force a check immediately (handy when you've pushed several updates in one day) — this ignores the throttle and the disable switch.
 - It's silent when you're up to date, offline, or throttled, and never blocks for long (a slow network aborts the check).
 - Updates are fast-forward only; if you have local changes it tells you to pull manually.
 
@@ -205,10 +205,11 @@ netbird-summary
 
 | Key | Action |
 |---|---|
-| `1` | Check for client updates |
+| `1` | Check for **NetBird client** updates |
 | `2` | List idle / connecting peers |
 | `3` | List reverse-proxy peers |
 | `s` | Re-print the summary |
+| `u` | Check for **netbird-summary script** updates now (ignores the once/day throttle) |
 | `q` | Quit |
 
 The prompt loops after each action until you press `q`.

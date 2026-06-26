@@ -500,24 +500,44 @@ _selfcheck_due() {
 
 # Auto-check GitHub for newer commits of THIS script and offer to git pull.
 # Silent when up to date, offline, throttled, or not a git checkout.
+# With "force": bypass the throttle (and the disable switch) and report the
+# outcome even when up to date — used by the manual action-prompt option.
 self_update_check() {
-    [[ -n "${NETBIRD_SUMMARY_NO_SELFCHECK:-}" ]] && return 0
-    command -v git >/dev/null 2>&1 || return 0
+    local force="${1:-}"
 
-    local repo; repo=$(self_repo_dir) || return 0
-    [[ -n "$repo" && -d "$repo/.git" ]] || return 0   # not a git checkout
+    if [[ -n "${NETBIRD_SUMMARY_NO_SELFCHECK:-}" && "$force" != force ]]; then
+        return 0
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+        [[ "$force" == force ]] && printf '  %sgit is not installed — cannot self-update.%s\n' "$RED" "$RESET"
+        return 0
+    fi
+
+    local repo; repo=$(self_repo_dir)
+    if [[ -z "$repo" || ! -d "$repo/.git" ]]; then
+        [[ "$force" == force ]] && printf '  %sNot a git checkout — cannot self-update.%s\n' "$YELLOW" "$RESET"
+        return 0
+    fi
 
     local stamp="$repo/.git/.netbird-summary-checked"
-    _selfcheck_due "$stamp" || return 0
+    [[ "$force" == force ]] || _selfcheck_due "$stamp" || return 0
     touch "$stamp" 2>/dev/null                          # throttle regardless of result
 
+    [[ "$force" == force ]] && printf '\n  %sChecking GitHub for netbird-summary updates…%s\n' "$DIM" "$RESET"
+
     # Lightweight fetch with a low-speed cutoff so a bad network can't hang us.
-    git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=5 \
-        fetch --quiet origin >/dev/null 2>&1 || return 0
+    if ! git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=5 \
+            fetch --quiet origin >/dev/null 2>&1; then
+        [[ "$force" == force ]] && printf '  %sCould not reach GitHub to check for updates.%s\n' "$RED" "$RESET"
+        return 0
+    fi
 
     local behind
-    behind=$(git -C "$repo" rev-list --count HEAD..@{u} 2>/dev/null) || return 0
-    [[ "$behind" =~ ^[0-9]+$ ]] && (( behind > 0 )) || return 0
+    behind=$(git -C "$repo" rev-list --count HEAD..@{u} 2>/dev/null)
+    if ! [[ "$behind" =~ ^[0-9]+$ ]] || (( behind == 0 )); then
+        [[ "$force" == force ]] && printf '  %s● netbird-summary is up to date.%s\n' "$GREEN" "$RESET"
+        return 0
+    fi
 
     printf '\n  %s%snetbird-summary update available%s — %s%s%s new commit(s) on GitHub\n' \
         "$BOLD" "$CYAN" "$RESET" "$BOLD" "$behind" "$RESET"
@@ -554,8 +574,8 @@ run_interactive() {
     show_summary
     local choice
     while true; do
-        printf '\n  %sActions:%s  %s1%s update check   %s2%s idle peers   %s3%s proxy peers   %ss%s summary   %sq%s quit  ' \
-            "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET"
+        printf '\n  %sActions:%s  %s1%s client update   %s2%s idle peers   %s3%s proxy peers   %ss%s summary   %su%s script update   %sq%s quit  ' \
+            "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET"
         read -rsn1 choice
         printf '%s\n' "$choice"
 
@@ -564,6 +584,7 @@ run_interactive() {
             2)         parse_peers && render_idle ;;
             3)         parse_peers && render_proxy ;;
             s|S)       show_summary ;;
+            u|U)       self_update_check force ;;
             q|Q|$'\e')  printf '\n'; return 0 ;;
             *)         printf '  %sInvalid option.%s\n' "$RED" "$RESET" ;;
         esac
