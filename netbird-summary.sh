@@ -194,43 +194,6 @@ render_idle() {
     printf '  %sFOR = time since the connection state last changed; a large value usually means the peer is offline.%s\n' "$DIM" "$RESET"
 }
 
-# Reverse-proxy / ingress peers (any status).
-render_proxy() {
-    local cN=44 cI=16 cS=12 cT=8 cP=21
-    local tot=$(( cN + cI + cS + cT + cP + 12 + 10 ))
-    local SEP; SEP=$(printf '─%.0s' $(seq 1 "$tot"))
-    local i n=0
-    for ((i=0; i<${#g_names[@]}; i++)); do is_proxy "${g_names[$i]}" && n=$((n+1)); done
-
-    printf '\n  %s%sReverse-proxy peers%s  %s(%d)%s\n' "$BOLD" "$CYAN" "$RESET" "$DIM" "$n" "$RESET"
-    printf '  %s%s%s\n' "$BOLD" "$SEP" "$RESET"
-    printf '  %s  %-'"$cN"'s %-'"$cI"'s %-'"$cS"'s %-'"$cT"'s %-'"$cP"'s %s%s\n' \
-        "$BOLD" "PEER" "NETBIRD IP" "STATUS" "TYPE" "REMOTE ENDPOINT" "FOR" "$RESET"
-    printf '  %s%s%s\n' "$BOLD" "$SEP" "$RESET"
-    if (( n == 0 )); then
-        printf '  %s  No reverse-proxy peers.%s\n' "$DIM" "$RESET"
-    else
-        local ind
-        for ((i=0; i<${#g_names[@]}; i++)); do
-            is_proxy "${g_names[$i]}" || continue
-            if [[ "${g_statuses[$i]}" == Connected ]]; then ind="${GREEN}●${RESET}"
-            else                                            ind="${RED}●${RESET}"
-            fi
-            printf '  %s %-'"$cN"'s %-'"$cI"'s %-'"$cS"'s %-'"$cT"'s %-'"$cP"'s %s\n' \
-                "$ind" \
-                "$(trunc "${g_names[$i]}"    $cN)" \
-                "$(trunc "${g_ips[$i]}"      $cI)" \
-                "$(trunc "${g_statuses[$i]}" $cS)" \
-                "$(trunc "${g_types[$i]}"    $cT)" \
-                "$(trunc "${g_ends[$i]}"     $cP)" \
-                "$(abbr_dur "${g_fors[$i]}")"
-        done
-    fi
-    printf '  %s%s%s\n' "$BOLD" "$SEP" "$RESET"
-    printf '  %sNetBird Reverse Proxy / ingress peers. A new one registers each time the proxy\n' "$DIM"
-    printf '  reconnects; usually only the newest is Connected and the others are stale leftovers.%s\n' "$RESET"
-}
-
 # Legend + ICE candidate reference.
 render_legend() {
     printf '\n  %sLegend:%s  %s● P2P (direct)%s   %s● Relayed%s   %s● Idle/Connecting%s\n' \
@@ -282,19 +245,20 @@ render_stats() {
 }
 
 # Default landing: connected peers + legend + stats, with idle/proxy hidden.
+# Reverse-proxy peers stay filtered out of every table; their count still shows
+# in the stats line.
 show_summary() {
     parse_peers || return 1
     render_connected
 
-    local i idle=0 prox=0
+    local i idle=0
     for ((i=0; i<${#g_names[@]}; i++)); do
-        if is_proxy "${g_names[$i]}"; then prox=$((prox+1))
-        elif [[ "${g_statuses[$i]}" != Connected ]]; then idle=$((idle+1))
-        fi
+        is_proxy "${g_names[$i]}" && continue
+        [[ "${g_statuses[$i]}" != Connected ]] && idle=$((idle+1))
     done
-    if (( idle > 0 || prox > 0 )); then
-        printf '\n  %s%d idle/connecting and %d reverse-proxy peer(s) hidden — see --all / --proxy.%s\n' \
-            "$DIM" "$idle" "$prox" "$RESET"
+    if (( idle > 0 )); then
+        printf '\n  %s%d idle/connecting peer(s) hidden — see --all.%s\n' \
+            "$DIM" "$idle" "$RESET"
     fi
 
     render_legend
@@ -1014,7 +978,6 @@ show_help() {
     printf '                               (just the summary when piped / non-interactive)\n'
     printf '  netbird-summary -s, --summary    Connected peers + stats only\n'
     printf '  netbird-summary -a, --all        ...also list idle / connecting peers\n'
-    printf '  netbird-summary -p, --proxy      ...also list reverse-proxy peers\n'
     printf '  netbird-summary -A, --access     Show access policy (what this peer can reach)\n'
     printf '  netbird-summary -u, --update     Check for updates and offer to upgrade\n'
     printf '  netbird-summary -h, --help       Show this help\n\n'
@@ -1032,16 +995,15 @@ run_interactive() {
     show_summary
     local choice
     while true; do
-        printf '\n  %sActions:%s  %s1%s client update   %s2%s idle peers   %s3%s proxy peers   %s4%s access policy   %ss%s summary   %su%s script update   %sq%s quit  ' \
-            "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET"
+        printf '\n  %sActions:%s  %s1%s client update   %s2%s idle peers   %s3%s access policy   %ss%s summary   %su%s script update   %sq%s quit  ' \
+            "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET"
         read -rsn1 choice
         printf '%s\n' "$choice"
 
         case "$choice" in
             1)         check_update ;;
             2)         parse_peers && render_idle ;;
-            3)         parse_peers && render_proxy ;;
-            4)         show_access_policy ;;
+            3)         show_access_policy ;;
             s|S)       show_summary ;;
             u|U)       self_update_check force ;;
             q|Q|$'\e')  printf '\n'; return 0 ;;
@@ -1054,7 +1016,6 @@ case "${1:-}" in
     -h|--help|help)        show_help ;;
     -u|--update|update)    check_update ;;
     -a|--all)              show_summary && render_idle ;;
-    -p|--proxy|proxy)      show_summary && render_proxy ;;
     -s|--summary|summary)  show_summary ;;
     -A|--access|access)    parse_peers && show_access_policy ;;
     "")
