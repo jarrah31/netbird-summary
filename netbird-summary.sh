@@ -673,9 +673,13 @@ with open('$tmpdir/resources.json', 'w') as f:
     json.dump({r['id']: r for r in lst}, f)
 " 2>/dev/null || printf '{}' > "$tmpdir/resources.json"
 
+    # Real terminal width. `tput cols` inside $(...) sees a pipe on stdout and
+    # falls back to the static terminfo default (80), so ask the tty directly.
     local cols
-    cols=$( (tput cols) 2>/dev/null )
-    [[ "$cols" =~ ^[0-9]+$ ]] || cols="${COLUMNS:-80}"
+    cols=$( stty size </dev/tty 2>/dev/null | awk '{print $2}' )
+    [[ "$cols" =~ ^[0-9]+$ && "$cols" -gt 0 ]] || cols=$( tput cols 2>/dev/null )
+    [[ "$cols" =~ ^[0-9]+$ && "$cols" -gt 0 ]] || cols="${COLUMNS:-80}"
+    [[ "$cols" =~ ^[0-9]+$ && "$cols" -gt 0 ]] || cols=80
 
     NB_COLS="$cols" python3 - "$my_ip" "$tmpdir" <<'PYEOF'
 import json, sys, os
@@ -725,8 +729,6 @@ my_group_ids = {g['id'] for g in groups for p in (g.get('peers') or []) if p['id
 my_group_names = sorted(group_by_id[gid]['name'] for gid in my_group_ids if gid in group_by_id)
 print(f"  {BOLD}Member of groups:{RESET} {', '.join(my_group_names) or '(none)'}")
 
-SEP = '─' * min(termw - 2, 100)
-
 # Each entry: (policy_name, rule, dest_kind, dest_data, note)
 #   dest_kind 'groups'   → dest_data is a set of group IDs
 #   dest_kind 'peer'     → dest_data is a peer dict
@@ -775,58 +777,15 @@ if not entries:
     print(f"\n  {YELLOW}No outbound access policies found for this peer.{RESET}")
     sys.exit(0)
 
-# ── Width-aware table. The only long field (ports) wraps with a hanging indent; ──
-# ── destination name/address sit in fixed columns sized to the terminal width.  ──
-# Reserve room for the widest row: indent(4) + dot+space(2) + name_w + gap(2)
-# + address(18, a /32 CIDR) + gap(2) + resource-type suffix(6) = name_w + 34.
-name_w = max(12, min(34, termw - 34))
-
-def _trunc(s, w):
-    return s if len(s) <= w else s[:max(1, w - 1)] + '…'
-
+# ── Build normalized render blocks (one per policy rule) ─────────────────────
 def _dot(connected):
-    if connected is True:  return f"{GREEN}●{RESET}"
-    if connected is False: return f"{RED}●{RESET}"
-    return f"{DIM}●{RESET}"
+    if connected is True:  return (GREEN, '●')
+    if connected is False: return (RED, '●')
+    return (DIM, '●')
 
-def dest_row(name, addr, connected, indent=4, suffix=''):
-    disp = _trunc(name, name_w)
-    pad  = ' ' * (name_w - len(disp) + 2)
-    tail = f"  {DIM}{suffix}{RESET}" if suffix else ''
-    print(f"{' ' * indent}{_dot(connected)} {disp}{pad}{addr}{tail}")
-
-def ports_row(tokens, indent=4, label='ports'):
-    head_pad = ' ' * indent
-    cont_pad = ' ' * (indent + len(label) + 2)
-    avail    = max(12, termw - len(cont_pad))
-    if not tokens:
-        print(f"{head_pad}{DIM}{label}:{RESET} all")
-        return
-    lines, cur = [], ''
-    for t in tokens:
-        piece = t if not cur else ', ' + t
-        if cur and len(cur) + len(piece) > avail:
-            lines.append(cur); cur = t
-        else:
-            cur += piece
-    if cur:
-        lines.append(cur)
-    print(f"{head_pad}{DIM}{label}:{RESET} {lines[0]}")
-    for ln in lines[1:]:
-        print(f"{cont_pad}{ln}")
-
-def policy_header(pol_name, proto, action, note):
-    left  = pol_name + (f"  {note}" if note else '')
-    right = f"{proto} · {action}"
-    gap   = termw - 2 - len(left) - len(right)
-    if gap < 2: gap = 2
-    print(f"  {BOLD}{left}{RESET}{' ' * gap}{DIM}{right}{RESET}")
-
-print(f"\n  {BOLD}{CYAN}Outbound access — what {my_peer_name} can reach{RESET}")
-
+blocks = []   # {policy, proto, tokens, rows:[{dot:(color,ch)|None, name, addr, dim}]}
 for pol_name, rule, dest_kind, dest_data, note in entries:
     proto  = (rule.get('protocol') or 'all').upper()
-    action = rule.get('action', 'accept')
     ports  = rule.get('ports') or []
     prs    = rule.get('port_ranges') or []
     tokens = sorted(ports, key=lambda x: int(x) if x.isdigit() else 0)
@@ -835,32 +794,129 @@ for pol_name, rule, dest_kind, dest_data, note in entries:
     if proto == 'ALL':
         tokens = []                              # all ports
 
-    print(f"  {BOLD}{SEP}{RESET}")
-    policy_header(pol_name, proto, action, note)
-    ports_row(tokens)
-
+    rows = []
     if dest_kind == 'groups':
         for gid in sorted(dest_data):
             g = group_by_id.get(gid)
             if not g:
                 continue
             members = [p for p in (g.get('peers') or []) if p['id'] != my_peer_id]
-            n = len(members)
-            print(f"    {DIM}group {g['name']} · {n} peer{'' if n == 1 else 's'}{RESET}")
+            rows.append({'dot': None, 'name': f"{g['name']} ({len(members)})", 'addr': '', 'dim': True})
             for pp in members:
                 d = peer_by_id.get(pp['id'], {})
-                dest_row(pp.get('name', pp['id']), d.get('ip', '?'), d.get('connected'), indent=6)
-            if n == 0:
-                print(f"      {DIM}(no other peers){RESET}")
+                rows.append({'dot': _dot(d.get('connected')), 'name': pp.get('name', pp['id']),
+                             'addr': d.get('ip', '?'), 'dim': False})
+            if not members:
+                rows.append({'dot': None, 'name': '(no other peers)', 'addr': '', 'dim': True})
     elif dest_kind == 'peer':
         p = dest_data
-        dest_row(p.get('name', '?'), p.get('ip', '?'), p.get('connected'))
+        rows.append({'dot': _dot(p.get('connected')), 'name': p.get('name', '?'),
+                     'addr': p.get('ip', '?'), 'dim': False})
     elif dest_kind == 'resource':
         r = dest_data
-        dest_row(r.get('name', '?'), r.get('address', '?'), None, suffix=r.get('type', 'resource'))
+        rows.append({'dot': (CYAN, '◆'), 'name': r.get('name', '?'),
+                     'addr': r.get('address', '?'), 'dim': False})
 
-print(f"  {BOLD}{SEP}{RESET}")
-print(f"  {GREEN}●{RESET} {DIM}connected{RESET}   {RED}●{RESET} {DIM}offline/unknown{RESET}")
+    pol_label = pol_name + (f" {note}" if note else '')
+    blocks.append({'policy': pol_label, 'proto': proto, 'tokens': tokens, 'rows': rows})
+
+# ── Size columns to the terminal: ports keep one line when wide and are the first ──
+# ── to wrap as it narrows (floored at ~4 ports/line) before names truncate.        ──
+GAPW, GAP        = 2, '  '
+POLICY_CAP, POLICY_MIN = 30, 10
+DEST_CAP,   DEST_MIN   = 26, 10
+PORTS_MIN              = 26                       # room for ~4 five-digit ports
+
+policy_w = min(POLICY_CAP, max([len('POLICY')]      + [len(b['policy']) for b in blocks]))
+dest_w   = min(DEST_CAP,   max([len('DESTINATION')] + [len(r['name']) for b in blocks for r in b['rows']] or [0]))
+addr_w   = min(18,         max([len('ADDRESS')]     + [len(r['addr']) for b in blocks for r in b['rows']] or [0]))
+proto_w  = min(11,         max([len('PROTO')]       + [len(b['proto']) for b in blocks]))
+
+overhead = 2 + GAPW * 4 + 2                       # indent + 4 gaps + dot+space
+ports_w  = termw - overhead - policy_w - dest_w - addr_w - proto_w
+
+# Phase 1: ports wrap first — reclaim from the name columns until ports reach their
+# comfortable floor (≈4 ports/line) or the names hit their minimums.
+need = PORTS_MIN - ports_w
+if need > 0:
+    take = min(need, policy_w - POLICY_MIN); policy_w -= take; ports_w += take; need -= take
+if need > 0:
+    take = min(need, dest_w - DEST_MIN);     dest_w   -= take; ports_w += take; need -= take
+
+# Phase 2 (very narrow only): if columns still don't fit, shrink PROTO then ADDRESS
+# so no line ever exceeds the terminal width.
+HARD_MIN = 8
+if ports_w < HARD_MIN:
+    take = min(HARD_MIN - ports_w, proto_w - 3);  proto_w -= take; ports_w += take
+if ports_w < HARD_MIN:
+    take = min(HARD_MIN - ports_w, addr_w - 15);  addr_w  -= take; ports_w += take
+ports_w = max(1, ports_w)
+
+# Don't stretch wider than the longest single-line port list (keeps the table
+# compact on very wide terminals; everything still fits on one line).
+max_ports_line = max([3] + [len(', '.join(b['tokens'])) for b in blocks if b['tokens']])
+ports_w = max(1, min(ports_w, max_ports_line))
+
+def fit(s, w):
+    if w <= 0:
+        return ''
+    if len(s) > w:
+        s = s[:max(1, w - 1)] + '…'
+    return s + ' ' * (w - len(s))
+
+def wrap_ports(tokens, w):
+    if not tokens:
+        return ['all']
+    lines, cur = [], ''
+    for t in tokens:
+        piece = t if not cur else ', ' + t
+        if cur and len(cur) + len(piece) > w:
+            lines.append(cur); cur = t
+        else:
+            cur += piece
+    if cur:
+        lines.append(cur)
+    return lines
+
+rule_w = min(termw - 2, 2 + policy_w + GAPW + 2 + dest_w + GAPW + addr_w + GAPW + proto_w + GAPW + ports_w)
+RULE   = '─' * rule_w
+
+print(f"\n  {BOLD}{CYAN}Outbound access — what {my_peer_name} can reach{RESET}")
+print(f"  {BOLD}{fit('POLICY', policy_w)}{GAP}  {fit('DESTINATION', dest_w)}{GAP}"
+      f"{fit('ADDRESS', addr_w)}{GAP}{fit('PROTO', proto_w)}{GAP}PORTS{RESET}")
+print(f"  {BOLD}{RULE}{RESET}")
+
+for bi, b in enumerate(blocks):
+    plines = wrap_ports(b['tokens'], ports_w)
+    rows   = b['rows']
+    height = max(len(rows), len(plines))
+    for i in range(height):
+        if i == 0:
+            pol = f"{BOLD}{fit(b['policy'], policy_w)}{RESET}"
+            pro = fit(b['proto'], proto_w)
+        else:
+            pol = ' ' * policy_w
+            pro = ' ' * proto_w
+        if i < len(rows):
+            r = rows[i]
+            if r['dot'] is None:
+                dot = '  '
+            else:
+                c, ch = r['dot']; dot = f"{c}{ch}{RESET} "
+            nm = fit(r['name'], dest_w)
+            if r['dim']:
+                nm = f"{DIM}{nm}{RESET}"
+            ad = fit(r['addr'], addr_w)
+        else:
+            dot, nm, ad = '  ', ' ' * dest_w, ' ' * addr_w
+        pc = plines[i] if i < len(plines) else ''
+        print(f"  {pol}{GAP}{dot}{nm}{GAP}{ad}{GAP}{pro}{GAP}{pc}")
+    if bi != len(blocks) - 1:
+        print()
+
+print(f"  {BOLD}{RULE}{RESET}")
+print(f"  {GREEN}●{RESET} {DIM}online peer{RESET}   {RED}●{RESET} {DIM}offline peer{RESET}   "
+      f"{CYAN}◆{RESET} {DIM}host/subnet{RESET}")
 PYEOF
 
     local rc=$?
