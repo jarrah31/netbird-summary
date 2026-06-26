@@ -676,7 +676,7 @@ with open('$tmpdir/resources.json', 'w') as f:
     # Real terminal width. `tput cols` inside $(...) sees a pipe on stdout and
     # falls back to the static terminfo default (80), so ask the tty directly.
     local cols
-    cols=$( stty size </dev/tty 2>/dev/null | awk '{print $2}' )
+    cols=$( stty size 2>/dev/null </dev/tty | awk '{print $2}' )
     [[ "$cols" =~ ^[0-9]+$ && "$cols" -gt 0 ]] || cols=$( tput cols 2>/dev/null )
     [[ "$cols" =~ ^[0-9]+$ && "$cols" -gt 0 ]] || cols="${COLUMNS:-80}"
     [[ "$cols" =~ ^[0-9]+$ && "$cols" -gt 0 ]] || cols=80
@@ -729,53 +729,81 @@ my_group_ids = {g['id'] for g in groups for p in (g.get('peers') or []) if p['id
 my_group_names = sorted(group_by_id[gid]['name'] for gid in my_group_ids if gid in group_by_id)
 print(f"  {BOLD}Member of groups:{RESET} {', '.join(my_group_names) or '(none)'}")
 
-# Each entry: (policy_name, rule, dest_kind, dest_data, note)
-#   dest_kind 'groups'   → dest_data is a set of group IDs
-#   dest_kind 'peer'     → dest_data is a peer dict
-#   dest_kind 'resource' → dest_data is a resource dict {name, address, type}
+# A rule "side" is either a list of groups (rule.sources / rule.destinations) or a
+# single resource (rule.sourceResource / rule.destinationResource). Resolve a side
+# into a renderable shape; report whether this peer is a member of it.
+def resolve_side(raw_list, resource):
+    if raw_list is not None:
+        return ('groups', {g['id'] for g in raw_list})
+    if resource:
+        rt, rid = resource.get('type', ''), resource.get('id', '')
+        if rt == 'peer':
+            p = peer_by_id.get(rid)
+            return ('peer', p) if p else (None, None)
+        res = resource_by_id.get(rid, {'name': rid, 'address': '?', 'type': rt})
+        return ('resource', res)
+    return (None, None)
+
+def peer_in_side(raw_list, resource):
+    if raw_list is not None:
+        return bool({g['id'] for g in raw_list} & my_group_ids)
+    if resource and resource.get('type') == 'peer':
+        return resource.get('id') == my_peer_id
+    return False
+
+# Each entry: (policy_name, rule, direction, side_kind, side_data, note)
+#   direction 'out' → this peer is a source; side is the destination it can reach
+#   direction 'in'  → this peer is a destination; side is the source that can reach it
+#   side_kind 'groups'   → side_data is a set of group IDs
+#   side_kind 'peer'     → side_data is a peer dict
+#   side_kind 'resource' → side_data is a resource dict {name, address, type}
 entries = []
+seen = set()
+def add_entry(pol_name, rule, direction, raw_side, res_side, note):
+    kind, data = resolve_side(raw_side, res_side)
+    if not kind:
+        return
+    if kind == 'groups':   key = tuple(sorted(data))
+    elif kind == 'peer':   key = data.get('id')
+    else:                  key = data.get('id')
+    sig = (rule.get('id'), direction, kind, key)
+    if sig in seen:
+        return
+    seen.add(sig)
+    entries.append((pol_name, rule, direction, kind, data, note))
+
 for pol in policies:
     if not pol.get('enabled', True):
         continue
     for rule in (pol.get('rules') or []):
         if not rule.get('enabled', True):
             continue
-        raw_src = rule.get('sources')       # list or null
-        raw_dst = rule.get('destinations')  # list or null
+        raw_src = rule.get('sources')              # list or null
+        raw_dst = rule.get('destinations')         # list or null
+        src_res = rule.get('sourceResource')
         dst_res = rule.get('destinationResource')
         bidir   = rule.get('bidirectional', False)
 
-        # Skip resource-to-resource rules (sources is null)
-        if raw_src is None:
-            continue
+        is_src = peer_in_side(raw_src, src_res)
+        is_dst = peer_in_side(raw_dst, dst_res)
 
-        src_ids = {g['id'] for g in raw_src}
-        dst_ids = {g['id'] for g in (raw_dst or [])}
-        is_src  = bool(src_ids & my_group_ids)
-        is_dst  = bool(dst_ids & my_group_ids)
-
+        # Forward direction of the rule (source initiates to destination)
         if is_src:
-            if raw_dst is not None:
-                # Standard group→group rule
-                entries.append((pol['name'], rule, 'groups', dst_ids, ''))
-            elif dst_res:
-                res_type = dst_res.get('type', '')
-                res_id   = dst_res.get('id', '')
-                if res_type == 'peer':
-                    peer = peer_by_id.get(res_id)
-                    if peer:
-                        entries.append((pol['name'], rule, 'peer', peer, ''))
-                else:
-                    res = resource_by_id.get(res_id, {'name': res_id, 'address': '?', 'type': res_type})
-                    entries.append((pol['name'], rule, 'resource', res, ''))
-
-        # Bidirectional: peer only in destinations → it can also initiate to the source groups
-        if bidir and is_dst and not is_src and raw_dst is not None:
-            entries.append((pol['name'], rule, 'groups', src_ids, '(bidirectional — peer is destination)'))
+            add_entry(pol['name'], rule, 'out', raw_dst, dst_res, '')   # peer reaches dest
+        if is_dst:
+            add_entry(pol['name'], rule, 'in',  raw_src, src_res, '')   # source reaches peer
+        # Bidirectional rules also permit the reverse initiation
+        if bidir and is_src:
+            add_entry(pol['name'], rule, 'in',  raw_dst, dst_res, '(bidirectional)')
+        if bidir and is_dst:
+            add_entry(pol['name'], rule, 'out', raw_src, src_res, '(bidirectional)')
 
 if not entries:
-    print(f"\n  {YELLOW}No outbound access policies found for this peer.{RESET}")
+    print(f"\n  {YELLOW}No access policies found for this peer.{RESET}")
     sys.exit(0)
+
+# Outbound first, then inbound; stable within each direction.
+entries.sort(key=lambda e: 0 if e[2] == 'out' else 1)
 
 # ── Build normalized render blocks (one per policy rule) ─────────────────────
 def _dot(connected):
@@ -783,8 +811,8 @@ def _dot(connected):
     if connected is False: return (RED, '●')
     return (DIM, '●')
 
-blocks = []   # {policy, proto, tokens, rows:[{dot:(color,ch)|None, name, addr, dim}]}
-for pol_name, rule, dest_kind, dest_data, note in entries:
+blocks = []   # {dir, policy, proto, tokens, rows:[{dot:(color,ch)|None, name, addr, dim}]}
+for pol_name, rule, direction, side_kind, side_data, note in entries:
     proto  = (rule.get('protocol') or 'all').upper()
     ports  = rule.get('ports') or []
     prs    = rule.get('port_ranges') or []
@@ -795,8 +823,8 @@ for pol_name, rule, dest_kind, dest_data, note in entries:
         tokens = []                              # all ports
 
     rows = []
-    if dest_kind == 'groups':
-        for gid in sorted(dest_data):
+    if side_kind == 'groups':
+        for gid in sorted(side_data):
             g = group_by_id.get(gid)
             if not g:
                 continue
@@ -808,31 +836,32 @@ for pol_name, rule, dest_kind, dest_data, note in entries:
                              'addr': d.get('ip', '?'), 'dim': False})
             if not members:
                 rows.append({'dot': None, 'name': '(no other peers)', 'addr': '', 'dim': True})
-    elif dest_kind == 'peer':
-        p = dest_data
+    elif side_kind == 'peer':
+        p = side_data
         rows.append({'dot': _dot(p.get('connected')), 'name': p.get('name', '?'),
                      'addr': p.get('ip', '?'), 'dim': False})
-    elif dest_kind == 'resource':
-        r = dest_data
+    elif side_kind == 'resource':
+        r = side_data
         rows.append({'dot': (CYAN, '◆'), 'name': r.get('name', '?'),
                      'addr': r.get('address', '?'), 'dim': False})
 
     pol_label = pol_name + (f" {note}" if note else '')
-    blocks.append({'policy': pol_label, 'proto': proto, 'tokens': tokens, 'rows': rows})
+    blocks.append({'dir': direction, 'policy': pol_label, 'proto': proto, 'tokens': tokens, 'rows': rows})
 
 # ── Size columns to the terminal: ports keep one line when wide and are the first ──
 # ── to wrap as it narrows (floored at ~4 ports/line) before names truncate.        ──
 GAPW, GAP        = 2, '  '
+DIR_W            = 3                              # "out" / "in"
 POLICY_CAP, POLICY_MIN = 30, 10
 DEST_CAP,   DEST_MIN   = 26, 10
 PORTS_MIN              = 26                       # room for ~4 five-digit ports
 
-policy_w = min(POLICY_CAP, max([len('POLICY')]      + [len(b['policy']) for b in blocks]))
-dest_w   = min(DEST_CAP,   max([len('DESTINATION')] + [len(r['name']) for b in blocks for r in b['rows']] or [0]))
-addr_w   = min(18,         max([len('ADDRESS')]     + [len(r['addr']) for b in blocks for r in b['rows']] or [0]))
-proto_w  = min(11,         max([len('PROTO')]       + [len(b['proto']) for b in blocks]))
+policy_w = min(POLICY_CAP, max([len('POLICY')]   + [len(b['policy']) for b in blocks]))
+dest_w   = min(DEST_CAP,   max([len('ENDPOINT')] + [len(r['name']) for b in blocks for r in b['rows']] or [0]))
+addr_w   = min(18,         max([len('ADDRESS')]  + [len(r['addr']) for b in blocks for r in b['rows']] or [0]))
+proto_w  = min(11,         max([len('PROTO')]    + [len(b['proto']) for b in blocks]))
 
-overhead = 2 + GAPW * 4 + 2                       # indent + 4 gaps + dot+space
+overhead = 2 + DIR_W + GAPW * 5 + 2              # indent + dir + 5 gaps + dot+space
 ports_w  = termw - overhead - policy_w - dest_w - addr_w - proto_w
 
 # Phase 1: ports wrap first — reclaim from the name columns until ports reach their
@@ -878,11 +907,13 @@ def wrap_ports(tokens, w):
         lines.append(cur)
     return lines
 
-rule_w = min(termw - 2, 2 + policy_w + GAPW + 2 + dest_w + GAPW + addr_w + GAPW + proto_w + GAPW + ports_w)
+rule_w = min(termw - 2, 2 + DIR_W + GAPW + policy_w + GAPW + 2 + dest_w
+             + GAPW + addr_w + GAPW + proto_w + GAPW + ports_w)
 RULE   = '─' * rule_w
 
-print(f"\n  {BOLD}{CYAN}Outbound access — what {my_peer_name} can reach{RESET}")
-print(f"  {BOLD}{fit('POLICY', policy_w)}{GAP}  {fit('DESTINATION', dest_w)}{GAP}"
+print(f"\n  {BOLD}{CYAN}Access policy for {my_peer_name}{RESET}")
+print(f"  {DIM}out: peer → endpoint   in: endpoint → peer{RESET}")
+print(f"  {BOLD}{fit('DIR', DIR_W)}{GAP}{fit('POLICY', policy_w)}{GAP}  {fit('ENDPOINT', dest_w)}{GAP}"
       f"{fit('ADDRESS', addr_w)}{GAP}{fit('PROTO', proto_w)}{GAP}PORTS{RESET}")
 print(f"  {BOLD}{RULE}{RESET}")
 
@@ -890,13 +921,17 @@ for bi, b in enumerate(blocks):
     plines = wrap_ports(b['tokens'], ports_w)
     rows   = b['rows']
     height = max(len(rows), len(plines))
+    is_out = b['dir'] == 'out'
     for i in range(height):
         if i == 0:
-            pol = f"{BOLD}{fit(b['policy'], policy_w)}{RESET}"
-            pro = fit(b['proto'], proto_w)
+            dcol = GREEN if is_out else YELLOW
+            dirc = f"{dcol}{BOLD}{fit('out' if is_out else 'in', DIR_W)}{RESET}"
+            pol  = f"{BOLD}{fit(b['policy'], policy_w)}{RESET}"
+            pro  = fit(b['proto'], proto_w)
         else:
-            pol = ' ' * policy_w
-            pro = ' ' * proto_w
+            dirc = ' ' * DIR_W
+            pol  = ' ' * policy_w
+            pro  = ' ' * proto_w
         if i < len(rows):
             r = rows[i]
             if r['dot'] is None:
@@ -910,13 +945,18 @@ for bi, b in enumerate(blocks):
         else:
             dot, nm, ad = '  ', ' ' * dest_w, ' ' * addr_w
         pc = plines[i] if i < len(plines) else ''
-        print(f"  {pol}{GAP}{dot}{nm}{GAP}{ad}{GAP}{pro}{GAP}{pc}")
+        print(f"  {dirc}{GAP}{pol}{GAP}{dot}{nm}{GAP}{ad}{GAP}{pro}{GAP}{pc}")
     if bi != len(blocks) - 1:
         print()
 
 print(f"  {BOLD}{RULE}{RESET}")
-print(f"  {GREEN}●{RESET} {DIM}online peer{RESET}   {RED}●{RESET} {DIM}offline peer{RESET}   "
-      f"{CYAN}◆{RESET} {DIM}host/subnet{RESET}")
+leg_dir = f"{GREEN}out{RESET} {DIM}peer → endpoint{RESET}   {YELLOW}in{RESET} {DIM}endpoint → peer{RESET}"
+leg_sta = f"{GREEN}●{RESET} {DIM}online{RESET}  {RED}●{RESET} {DIM}offline{RESET}  {CYAN}◆{RESET} {DIM}host/subnet{RESET}"
+if 2 + 40 + 4 + 34 <= termw:                     # plain widths of the two legend halves
+    print(f"  {leg_dir}    {leg_sta}")
+else:
+    print(f"  {leg_dir}")
+    print(f"  {leg_sta}")
 PYEOF
 
     local rc=$?
