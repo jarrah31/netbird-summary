@@ -1,12 +1,14 @@
 # netbird-summary
 
-A bash script that parses `netbird status --detail` and displays a concise, color-coded peer connection summary table — and checks for (and installs) NetBird client updates.
+A bash script that turns `netbird status --detail` into a concise, color-coded peer connection summary — and can also show **which devices, resources and ports the current peer is allowed to reach** (and who can reach it) by querying the NetBird management API. It also checks for and installs NetBird client updates.
 
 Instead of scrolling through verbose multi-line output for each peer, get a single table showing every peer's status at a glance.
 
 ## Example Output
 
-By default the summary lists **connected, non-proxy** peers in detail, hides idle/connecting and reverse-proxy peers behind a one-line note, and ends with a stats line:
+### Peer summary
+
+By default the summary lists **connected** peers in detail, hides idle/connecting peers behind a one-line note, and ends with a stats line:
 
 ```
   NetBird Peer Connection Summary
@@ -18,7 +20,7 @@ By default the summary lists **connected, non-proxy** peers in detail, hides idl
   ● cloud-vps                      100.10.0.3       Relayed relay/relay  -                     85.0K/64.0K     12s       85.33ms
   ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-  1 idle/connecting and 9 reverse-proxy peer(s) hidden — see --all / --proxy.
+  1 idle/connecting peer(s) hidden — see --all.
 
   Legend:  ● P2P (direct)   ● Relayed   ● Idle/Connecting
 
@@ -31,23 +33,55 @@ By default the summary lists **connected, non-proxy** peers in detail, hides idl
 
   This peer IP:   100.10.0.5
   Peers:          12 total · 2 connected (1 P2P, 1 relayed) · 1 idle · 9 reverse-proxy (1 up)
-  Management:     Connected to https://api.netbird.io:443
+  Management:     Connected to https://nb.example.com:443
   Daemon version: 0.73.2
 ```
 
-Press `2` (or `--all`) to list idle/connecting peers, or `3` (or `--proxy`) for reverse-proxy peers, each with how long they've been in that state:
+Reverse-proxy / ingress peers (auto-named `proxy-…`) are kept out of every table to reduce clutter; only their count appears in the stats line. Press `3` (or `--all`) to list idle/connecting peers, each with how long they've been in that state.
+
+### Access policy (`2` or `--access`)
+
+Shows what this peer can reach **out**bound and who can reach it **in**bound, derived from your NetBird access-control policies via the API:
 
 ```
-  Reverse-proxy peers  (9)
-  ───────────────────────────────────────────────────────────────────────────────────────────────────────────
-    PEER                                         NETBIRD IP       STATUS       TYPE     REMOTE ENDPOINT       FOR
-  ───────────────────────────────────────────────────────────────────────────────────────────────────────────
-  ● proxy-d8lh86r95s1s73dm1big-70-123.netbird.… 100.124.70.123   Connecting   -        -                     2h12m
-  ● proxy-d8u48hj95s1s739icub0-204-116.netbird… 100.124.204.116  Connected    Relayed  -                     2h12m
-  ───────────────────────────────────────────────────────────────────────────────────────────────────────────
-  NetBird Reverse Proxy / ingress peers. A new one registers each time the proxy
-  reconnects; usually only the newest is Connected and the others are stale leftovers.
+  NetBird Access Policy
+  This peer: 100.10.0.5/16
+  API:       https://nb.example.com:443/api
+
+  Fetching peers, groups, policies and network resources…
+  Member of groups: Admins, Workstations
+
+  Access policy for laptop-01
+  out: peer → endpoint   in: endpoint → peer
+  DIR  POLICY          ENDPOINT          ADDRESS          PROTO  PORTS
+  ──────────────────────────────────────────────────────────────────────────
+  out  Web Apps      ● app-server      100.10.0.20      TCP    80, 443
+
+  out  Home Router   ◆ router          192.168.1.1/32   TCP    443, 8443
+
+  out  Database        Servers (2)                       TCP    5432
+                     ● app-server      100.10.0.20
+                     ● db-primary      100.10.0.21
+
+  in   SSH Admin       Admins (1)                        TCP    22
+                     ● jump-box        100.10.0.9
+  ──────────────────────────────────────────────────────────────────────────
+  out peer → endpoint   in endpoint → peer    ● online  ● offline  ◆ host/subnet
 ```
+
+| Column | Description |
+|---|---|
+| **DIR** | `out` = this peer initiates to the endpoint · `in` = the endpoint initiates to this peer |
+| **POLICY** | The access-control policy that grants the access |
+| **ENDPOINT** | The other end: a single peer (`●`), a whole group (its members are listed beneath), or a host/subnet network resource (`◆`) |
+| **ADDRESS** | The endpoint's NetBird IP, or a resource's address (e.g. a `/32` host or a subnet) |
+| **PROTO / PORTS** | Protocol and the allowed ports (`all` when the policy isn't port-restricted) |
+
+A peer can appear as both `out` and `in` for the same policy when it sits on both sides. The system **All** group (which contains every peer) is used for matching but hidden from the *Member of groups* line since it's not informative.
+
+The table is **width-aware**: on a wide terminal everything fits on one line; as the window narrows the ports column wraps first, then the policy/endpoint names shorten, so nothing ever overflows the terminal.
+
+> See [Access control (API access)](#access-control-api-access) for how the API token is requested and stored.
 
 ## Columns
 
@@ -64,7 +98,7 @@ Press `2` (or `--all`) to list idle/connecting peers, or `3` (or `--proxy`) for 
 | **Handshake** | Time since the last WireGuard handshake |
 | **Latency** | Round-trip latency to the peer |
 
-**Idle / connecting peers** (shown with `--all`) list **Peer**, **NetBird IP**, **Status**, and **For** (how long the peer has been in its current state — a large value usually means it's offline). **Reverse-proxy peers** (shown with `--proxy`) additionally show **Type** and **Remote Endpoint**.
+**Idle / connecting peers** (shown with `3` or `--all`) list **Peer**, **NetBird IP**, **Status**, and **For** (how long the peer has been in its current state — a large value usually means it's offline).
 
 ## Status Indicators
 
@@ -73,12 +107,14 @@ Press `2` (or `--all`) to list idle/connecting peers, or `3` (or `--proxy`) for 
 - 🔵 **Cyan** — Connected, connection type not yet known
 - 🔴 **Red** — Idle, connecting, or disconnected
 
-> **About `proxy-…` peer names and stuck "Connecting" status:** NetBird auto-generates a hostname (e.g. `proxy-<id>-<ip>`) when a peer registers without a meaningful one. Rename peers in the NetBird dashboard to get friendly names here. A peer that stays "Connecting" with a large **For** time is typically offline/unreachable, or an on-demand (lazy-connection) peer that only links up when there's traffic.
+> **About `proxy-…` peer names and stuck "Connecting" status:** NetBird auto-generates a hostname (e.g. `proxy-<id>-<ip>`) when a peer registers without a meaningful one. Rename peers in the NetBird dashboard to get friendly names here. These reverse-proxy / ingress peers are filtered out of the tables (a fresh one registers each time the proxy reconnects, so they pile up as stale "Connecting" entries) — only their count shows in the stats line. A normal peer that stays "Connecting" with a large **For** time is typically offline/unreachable, or an on-demand (lazy-connection) peer that only links up when there's traffic.
 
 ## Requirements
 
 - [NetBird](https://netbird.io/) installed and running (`netbird status --detail` must work)
 - Bash 3.2+ (macOS default is fine)
+- `curl` — used for the update check and the access-policy API calls
+- `python3` — **only** for the access-policy view (standard library only, no pip packages needed)
 
 ## Installation
 
@@ -155,6 +191,67 @@ Ensure `~/bin` is in your PATH. Git Bash typically includes it by default.
 netbird-summary
 ```
 
+## Access control (API access)
+
+The **access policy** view (`2` / `--access`) needs read access to your NetBird management API.
+
+- **On first use** it prompts for a **NetBird API token**. Create one in the dashboard under **Settings → API Keys** — a read-only service user is enough.
+- The token is saved to `~/.config/netbird-summary/api_key` with `600` permissions, and the management API URL is auto-detected from `netbird status` and cached at `~/.config/netbird-summary/api_url`. (Both honor `XDG_CONFIG_HOME`.)
+- If the token is later **rejected** (for example it has expired or been revoked, returning HTTP 401/403), the script says so and prompts for a replacement, then retries. Connection failures and other errors get their own distinct messages.
+- To **reset** the stored credentials, delete the directory:
+
+  ```bash
+  rm -rf ~/.config/netbird-summary
+  ```
+
+Under the hood it reads `/peers`, `/groups`, `/policies` and `/networks/resources`, then works out — for every **enabled** policy rule — where this peer sits (as a source and/or destination, whether via group membership or a direct peer/resource reference) and what that grants in each direction.
+
+## Usage
+
+Run with no arguments. It prints the summary immediately, then shows a single-keypress action prompt (no Enter needed):
+
+```bash
+netbird-summary
+```
+
+```
+  ...summary table and stats...
+
+  Actions:  1 summary   2 access policy   3 idle peers   a client update   b script update   q quit
+```
+
+| Key | Action |
+|---|---|
+| `1` | Re-print the peer summary |
+| `2` | Show the **access policy** (devices/ports this peer can reach, and who can reach it) |
+| `3` | List idle / connecting peers |
+| `a` | Check for **NetBird client** updates |
+| `b` | Check for **netbird-summary script** updates now (ignores the once/day throttle) |
+| `q` | Quit |
+
+The prompt loops after each action until you press `q`.
+
+Or jump straight to an action with a flag:
+
+```bash
+netbird-summary -s   # or --summary : connected peers + stats only
+netbird-summary -a   # or --all     : also list idle / connecting peers
+netbird-summary -A   # or --access  : show the access policy (needs an API token)
+netbird-summary -u   # or --update  : check for client updates and offer to upgrade
+netbird-summary -h   # or --help    : show usage
+```
+
+> Note `-a` / `--all` (idle peers) and `-A` / `--access` (access policy) differ only by case.
+
+When the output is piped or run non-interactively (e.g. from cron), the action prompt is skipped and only the summary is printed — so existing scripts and symlinks keep working.
+
+### Hidden peer categories
+
+By default the summary shows only **connected, non-proxy** peers. Two categories are kept out to keep it clean:
+
+- **Idle / connecting** peers — a one-line note reports how many; list them with `3` or `--all`.
+- **Reverse-proxy peers** — NetBird's [reverse-proxy / ingress](https://docs.netbird.io/manage/reverse-proxy) peers (auto-named `proxy-…`). A fresh one registers each time the proxy reconnects, so these pile up as stale "Connecting" entries with only the newest actually up. They're filtered out of every table; only their count appears in the stats line.
+
 ## Updating netbird-summary
 
 To pull the latest version of this script from GitHub, run `git pull` inside the cloned repository:
@@ -176,9 +273,10 @@ When run interactively, `netbird-summary` also checks GitHub for newer commits o
   Update netbird-summary now (git pull)? [y/N]
 ```
 
-- The check is **throttled to at most once per day** and runs only when the script lives in a git checkout (i.e. installed via the one-liner or `git clone`). Press **`u`** at the action prompt to force a check immediately (handy when you've pushed several updates in one day) — this ignores the throttle and the disable switch.
+- The check is **throttled to at most once per day** and runs only when the script lives in a git checkout (i.e. installed via the one-liner or `git clone`). Press **`b`** at the action prompt to force a check immediately (handy when you've pushed several updates in one day) — this ignores the throttle and the disable switch.
 - It's silent when you're up to date, offline, or throttled, and never blocks for long (a slow network aborts the check).
 - Updates are fast-forward only; if you have local changes it tells you to pull manually.
+- After a **successful** update the script **quits automatically** — the copy already running is the previous version and a shell script can't reload its own code mid-run, so it exits and asks you to re-run `netbird-summary` to use the new version.
 
 Environment variables:
 
@@ -187,55 +285,11 @@ Environment variables:
 | `NETBIRD_SUMMARY_NO_SELFCHECK=1` | Disable the automatic self-update check entirely |
 | `NETBIRD_SUMMARY_CHECK_INTERVAL_MIN=<n>` | Minimum minutes between checks (default `1440`) |
 
-> This updates the **netbird-summary** script itself. To update the **NetBird client**, press `1` at the action prompt (or `netbird-summary --update`).
+> This updates the **netbird-summary** script itself. To update the **NetBird client**, press `a` at the action prompt (or `netbird-summary --update`).
 
-## Usage
+## Checking for client updates
 
-Run with no arguments. It prints the summary immediately, then shows a single-keypress action prompt (no Enter needed):
-
-```bash
-netbird-summary
-```
-
-```
-  ...summary table and stats...
-
-  Actions:  1 update check   2 idle peers   3 proxy peers   s summary   q quit
-```
-
-| Key | Action |
-|---|---|
-| `1` | Check for **NetBird client** updates |
-| `2` | List idle / connecting peers |
-| `3` | List reverse-proxy peers |
-| `s` | Re-print the summary |
-| `u` | Check for **netbird-summary script** updates now (ignores the once/day throttle) |
-| `q` | Quit |
-
-The prompt loops after each action until you press `q`.
-
-Or jump straight to an action with a flag:
-
-```bash
-netbird-summary -s   # or --summary : connected peers + stats only
-netbird-summary -a   # or --all     : also list idle / connecting peers
-netbird-summary -p   # or --proxy   : also list reverse-proxy peers
-netbird-summary -u   # or --update  : check for updates and offer to upgrade
-netbird-summary -h   # or --help    : show usage
-```
-
-When the output is piped or run non-interactively (e.g. from cron), the action prompt is skipped and only the summary is printed — so existing scripts and symlinks keep working.
-
-### Hidden peer categories
-
-By default the summary shows only **connected, non-proxy** peers. Two categories are hidden to keep it clean (a one-line note reports how many):
-
-- **Idle / connecting** peers — list them with `2` or `--all`.
-- **Reverse-proxy peers** — NetBird's [reverse-proxy / ingress](https://docs.netbird.io/manage/reverse-proxy) peers (auto-named `proxy-…`). A fresh one registers each time the proxy reconnects, so these tend to pile up as stale "Connecting" entries with only the newest actually up. List them with `3` or `--proxy`.
-
-## Checking for updates
-
-Pressing **`1`** (or `--update`) compares your installed client version (`netbird version`) against the latest release published on [NetBird's GitHub](https://github.com/netbirdio/netbird/releases) and tells you whether you're up to date.
+Pressing **`a`** (or `--update`) compares your installed client version (`netbird version`) against the latest release published on [NetBird's GitHub](https://github.com/netbirdio/netbird/releases) and tells you whether you're up to date.
 
 If a newer version is available **on Linux**, the script offers to upgrade you. It detects how NetBird was installed and uses the matching method:
 
@@ -252,7 +306,7 @@ The exact commands are shown and require a single-key `y` confirmation before an
 
 On macOS the update check still reports your version status, but upgrades are left to your original install method (e.g. `brew upgrade netbird` or the `.pkg` installer).
 
-> **Note:** the GitHub version check is only performed when you choose the update option — normal summary runs stay fast and make no network calls.
+> **Note:** the GitHub version check is only performed when you choose the update option, and the access-policy API calls only run when you choose that view — normal summary runs stay fast and make no network calls.
 
 ## License
 
