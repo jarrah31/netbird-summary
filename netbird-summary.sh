@@ -995,17 +995,17 @@ run_interactive() {
     show_summary
     local choice
     while true; do
-        printf '\n  %sActions:%s  %s1%s client update   %s2%s idle peers   %s3%s access policy   %ss%s summary   %su%s script update   %sq%s quit  ' \
+        printf '\n  %sActions:%s  %s1%s summary   %s2%s access policy   %s3%s idle peers   %sa%s client update   %sb%s script update   %sq%s quit  ' \
             "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET"
         read -rsn1 choice
         printf '%s\n' "$choice"
 
         case "$choice" in
-            1)         check_update ;;
-            2)         parse_peers && render_idle ;;
-            3)         show_access_policy ;;
-            s|S)       show_summary ;;
-            u|U)       self_update_check force ;;
+            1)         show_summary ;;
+            2)         show_access_policy ;;
+            3)         parse_peers && render_idle ;;
+            a|A)       check_update ;;
+            b|B)       self_update_check force ;;
             q|Q|$'\e')  printf '\n'; return 0 ;;
             *)         printf '  %sInvalid option.%s\n' "$RED" "$RESET" ;;
         esac
