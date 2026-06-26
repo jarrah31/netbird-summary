@@ -166,6 +166,27 @@ git pull
 
 If you set up a symlink during installation, you don't need to do anything else — the symlink points at the script in the repo, so it picks up the update automatically.
 
+### Automatic update check
+
+When run interactively, `netbird-summary` also checks GitHub for newer commits of **itself** and, if you're behind, offers to `git pull`:
+
+```
+  netbird-summary update available — 2 new commit(s) on GitHub
+  /home/you/.local/share/netbird-summary
+  Update netbird-summary now (git pull)? [y/N]
+```
+
+- The check is **throttled to at most once per day** and runs only when the script lives in a git checkout (i.e. installed via the one-liner or `git clone`).
+- It's silent when you're up to date, offline, or throttled, and never blocks for long (a slow network aborts the check).
+- Updates are fast-forward only; if you have local changes it tells you to pull manually.
+
+Environment variables:
+
+| Variable | Effect |
+|---|---|
+| `NETBIRD_SUMMARY_NO_SELFCHECK=1` | Disable the automatic self-update check entirely |
+| `NETBIRD_SUMMARY_CHECK_INTERVAL_MIN=<n>` | Minimum minutes between checks (default `1440`) |
+
 > This updates the **netbird-summary** script itself. To update the **NetBird client**, press `1` at the action prompt (or `netbird-summary --update`).
 
 ## Usage

@@ -476,6 +476,62 @@ check_update() {
 }
 
 # ════════════════════════════════════════════════════════════════════════════════
+#  Self-update (the netbird-summary script itself)
+# ════════════════════════════════════════════════════════════════════════════════
+
+# Resolve the directory of the real script, following symlinks (the install
+# symlink points at netbird-summary.sh inside the cloned repo).
+self_repo_dir() {
+    local src="${BASH_SOURCE[0]}" dir
+    while [ -h "$src" ]; do
+        dir=$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)
+        src=$(readlink "$src")
+        [[ "$src" != /* ]] && src="$dir/$src"
+    done
+    cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+
+# True if the throttled remote check is due (default: at most once per day).
+_selfcheck_due() {
+    local stamp="$1" maxmin="${NETBIRD_SUMMARY_CHECK_INTERVAL_MIN:-1440}"
+    [[ -f "$stamp" ]] || return 0
+    [[ -n "$(find "$stamp" -mmin +"$maxmin" 2>/dev/null)" ]]
+}
+
+# Auto-check GitHub for newer commits of THIS script and offer to git pull.
+# Silent when up to date, offline, throttled, or not a git checkout.
+self_update_check() {
+    [[ -n "${NETBIRD_SUMMARY_NO_SELFCHECK:-}" ]] && return 0
+    command -v git >/dev/null 2>&1 || return 0
+
+    local repo; repo=$(self_repo_dir) || return 0
+    [[ -n "$repo" && -d "$repo/.git" ]] || return 0   # not a git checkout
+
+    local stamp="$repo/.git/.netbird-summary-checked"
+    _selfcheck_due "$stamp" || return 0
+    touch "$stamp" 2>/dev/null                          # throttle regardless of result
+
+    # Lightweight fetch with a low-speed cutoff so a bad network can't hang us.
+    git -C "$repo" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=5 \
+        fetch --quiet origin >/dev/null 2>&1 || return 0
+
+    local behind
+    behind=$(git -C "$repo" rev-list --count HEAD..@{u} 2>/dev/null) || return 0
+    [[ "$behind" =~ ^[0-9]+$ ]] && (( behind > 0 )) || return 0
+
+    printf '\n  %s%snetbird-summary update available%s — %s%s%s new commit(s) on GitHub\n' \
+        "$BOLD" "$CYAN" "$RESET" "$BOLD" "$behind" "$RESET"
+    printf '  %s%s%s\n' "$DIM" "$repo" "$RESET"
+    if confirm "Update netbird-summary now (git pull)?"; then
+        if git -C "$repo" pull --ff-only --quiet; then
+            printf '  %s✓ Updated. Restart netbird-summary to run the new version.%s\n' "$GREEN" "$RESET"
+        else
+            printf '  %s✗ Update failed — you may have local changes. Run: git -C %s pull%s\n' "$RED" "$repo" "$RESET"
+        fi
+    fi
+}
+
+# ════════════════════════════════════════════════════════════════════════════════
 #  Menu & dispatch
 # ════════════════════════════════════════════════════════════════════════════════
 show_help() {
@@ -487,11 +543,14 @@ show_help() {
     printf '  netbird-summary -a, --all        ...also list idle / connecting peers\n'
     printf '  netbird-summary -p, --proxy      ...also list reverse-proxy peers\n'
     printf '  netbird-summary -u, --update     Check for updates and offer to upgrade\n'
-    printf '  netbird-summary -h, --help       Show this help\n'
+    printf '  netbird-summary -h, --help       Show this help\n\n'
+    printf 'On interactive launch it also checks GitHub (at most once/day) for newer\n'
+    printf 'commits of this script and offers to git pull. Disable with NETBIRD_SUMMARY_NO_SELFCHECK=1.\n'
 }
 
 # Show the summary once, then loop a single-keypress action prompt.
 run_interactive() {
+    self_update_check
     show_summary
     local choice
     while true; do
