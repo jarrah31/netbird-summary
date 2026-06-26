@@ -552,6 +552,323 @@ self_update_check() {
 }
 
 # ════════════════════════════════════════════════════════════════════════════════
+#  Access policy (API-based)
+# ════════════════════════════════════════════════════════════════════════════════
+
+NB_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/netbird-summary"
+NB_API_KEY_FILE="$NB_CONFIG_DIR/api_key"
+NB_API_URL_FILE="$NB_CONFIG_DIR/api_url"
+
+# Load stored API key into $NB_API_KEY. Returns 0 if found and non-empty.
+_load_api_key() {
+    [[ -f "$NB_API_KEY_FILE" ]] || return 1
+    NB_API_KEY=$(cat "$NB_API_KEY_FILE")
+    [[ -n "$NB_API_KEY" ]]
+}
+
+# Prompt for an API key, save it to disk (mode 600), set $NB_API_KEY.
+_prompt_api_key() {
+    printf '\n  %sNetBird API key not found.%s\n' "$YELLOW" "$RESET"
+    printf '  Generate one in the dashboard under Settings → API Keys.\n'
+    printf '  Paste your API key: '
+    read -r NB_API_KEY
+    if [[ -z "$NB_API_KEY" ]]; then
+        printf '  %sNo key entered — aborting.%s\n' "$RED" "$RESET"
+        return 1
+    fi
+    mkdir -p "$NB_CONFIG_DIR"
+    chmod 700 "$NB_CONFIG_DIR"
+    printf '%s' "$NB_API_KEY" > "$NB_API_KEY_FILE"
+    chmod 600 "$NB_API_KEY_FILE"
+    printf '  %s✓ Key saved to %s%s\n' "$GREEN" "$NB_API_KEY_FILE" "$RESET"
+}
+
+# Ensure $NB_API_KEY is set. Returns 0 if ready.
+_require_api_key() { _load_api_key || _prompt_api_key; }
+
+# Derive or load the management API base URL into $NB_API_BASE.
+_require_api_url() {
+    if [[ -f "$NB_API_URL_FILE" ]]; then
+        NB_API_BASE=$(cat "$NB_API_URL_FILE")
+        [[ -n "$NB_API_BASE" ]] && return 0
+    fi
+    # Extract HTTPS URL from the Management line of status output
+    local url
+    url=$(printf '%s' "$g_raw" | awk '/^Management:/' | grep -oE 'https?://[^[:space:]]+' | head -1)
+    if [[ -n "$url" ]]; then
+        NB_API_BASE="${url%/}/api"
+        mkdir -p "$NB_CONFIG_DIR"
+        chmod 700 "$NB_CONFIG_DIR"
+        printf '%s' "$NB_API_BASE" > "$NB_API_URL_FILE"
+        chmod 600 "$NB_API_URL_FILE"
+        return 0
+    fi
+    printf '\n  %sCould not detect the management server URL from status output.%s\n' "$YELLOW" "$RESET"
+    printf '  Enter the API base URL (e.g. https://my-server.com/api):\n  > '
+    read -r NB_API_BASE
+    if [[ -z "$NB_API_BASE" ]]; then
+        printf '  %sNo URL entered — aborting.%s\n' "$RED" "$RESET"
+        return 1
+    fi
+    mkdir -p "$NB_CONFIG_DIR"
+    chmod 700 "$NB_CONFIG_DIR"
+    printf '%s' "$NB_API_BASE" > "$NB_API_URL_FILE"
+    chmod 600 "$NB_API_URL_FILE"
+}
+
+# Authenticated GET to the NetBird management API.
+_nb_api() { curl -fsSL --max-time 15 \
+    -H "Authorization: Token $NB_API_KEY" \
+    -H "Accept: application/json" \
+    "${NB_API_BASE}${1}"; }
+
+show_access_policy() {
+    _require_api_key || return 1
+
+    # Status must be parsed before we can detect the management URL and this peer's IP.
+    [[ -z "$g_raw" ]] && { parse_peers || return 1; }
+
+    _require_api_url || return 1
+
+    local my_ip
+    my_ip=$(awk '/^NetBird IP:/{print $3}' <<< "$g_raw")
+    if [[ -z "$my_ip" ]]; then
+        printf '  %sCould not determine this peer'\''s NetBird IP from status output.%s\n' "$RED" "$RESET"
+        return 1
+    fi
+
+    printf '\n  %s%sNetBird Access Policy%s\n' "$BOLD" "$CYAN" "$RESET"
+    printf '  This peer: %s\n' "$my_ip"
+    printf '  API:       %s\n\n' "$NB_API_BASE"
+    printf '  %sFetching peers, groups, policies and network resources…%s\n' "$DIM" "$RESET"
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf '  %spython3 is required for policy analysis but was not found.%s\n' "$RED" "$RESET"
+        return 1
+    fi
+
+    local tmpdir
+    tmpdir=$(mktemp -d 2>/dev/null) || { printf '  %sCould not create temp directory.%s\n' "$RED" "$RESET"; return 1; }
+
+    local ok=0
+    _nb_api "/peers"              > "$tmpdir/peers.json"     2>/dev/null && \
+    _nb_api "/groups"             > "$tmpdir/groups.json"    2>/dev/null && \
+    _nb_api "/policies"           > "$tmpdir/policies.json"  2>/dev/null && \
+    _nb_api "/networks/resources" > "$tmpdir/res_list.json"  2>/dev/null && ok=1
+
+    if (( ok == 0 )); then
+        printf '  %sAPI call failed — verify your key and server URL.%s\n' "$RED" "$RESET"
+        printf '  %sTo reset stored credentials delete: %s%s\n' "$DIM" "$NB_CONFIG_DIR" "$RESET"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # Convert resource list → id→object map for O(1) lookup
+    python3 -c "
+import json
+with open('$tmpdir/res_list.json') as f:
+    lst = json.load(f)
+if not isinstance(lst, list): lst = []
+with open('$tmpdir/resources.json', 'w') as f:
+    json.dump({r['id']: r for r in lst}, f)
+" 2>/dev/null || printf '{}' > "$tmpdir/resources.json"
+
+    local cols
+    cols=$( (tput cols) 2>/dev/null )
+    [[ "$cols" =~ ^[0-9]+$ ]] || cols="${COLUMNS:-80}"
+
+    NB_COLS="$cols" python3 - "$my_ip" "$tmpdir" <<'PYEOF'
+import json, sys, os
+
+BOLD   = '\033[1m'
+GREEN  = '\033[32m'
+YELLOW = '\033[33m'
+RED    = '\033[31m'
+CYAN   = '\033[36m'
+DIM    = '\033[2m'
+RESET  = '\033[0m'
+
+my_ip, tmpdir = sys.argv[1], sys.argv[2]
+
+try:
+    termw = int(os.environ.get('NB_COLS', '80'))
+except ValueError:
+    termw = 80
+termw = max(60, termw)
+
+def jload(path):
+    with open(path) as f:
+        data = json.load(f)
+    return data if isinstance(data, list) else []
+
+peers    = jload(os.path.join(tmpdir, 'peers.json'))
+groups   = jload(os.path.join(tmpdir, 'groups.json'))
+policies = jload(os.path.join(tmpdir, 'policies.json'))
+
+with open(os.path.join(tmpdir, 'resources.json')) as f:
+    resource_by_id = json.load(f)   # id → {name, address, type}
+
+peer_by_id  = {p['id']: p for p in peers}
+group_by_id = {g['id']: g for g in groups}
+
+# Find this peer by its overlay IP (status appends /prefix, API does not)
+my_ip_bare = my_ip.split('/')[0]
+my_peer_id = next((p['id'] for p in peers if p.get('ip') == my_ip_bare), None)
+if not my_peer_id:
+    print(f"  {RED}This peer ({my_ip_bare}) was not found in the API peer list.{RESET}")
+    print(f"  {DIM}Check that the API key has access to all peers.{RESET}")
+    sys.exit(1)
+my_peer_name = peer_by_id.get(my_peer_id, {}).get('name', my_ip_bare)
+
+# Groups this peer belongs to
+my_group_ids = {g['id'] for g in groups for p in (g.get('peers') or []) if p['id'] == my_peer_id}
+my_group_names = sorted(group_by_id[gid]['name'] for gid in my_group_ids if gid in group_by_id)
+print(f"  {BOLD}Member of groups:{RESET} {', '.join(my_group_names) or '(none)'}")
+
+SEP = '─' * min(termw - 2, 100)
+
+# Each entry: (policy_name, rule, dest_kind, dest_data, note)
+#   dest_kind 'groups'   → dest_data is a set of group IDs
+#   dest_kind 'peer'     → dest_data is a peer dict
+#   dest_kind 'resource' → dest_data is a resource dict {name, address, type}
+entries = []
+for pol in policies:
+    if not pol.get('enabled', True):
+        continue
+    for rule in (pol.get('rules') or []):
+        if not rule.get('enabled', True):
+            continue
+        raw_src = rule.get('sources')       # list or null
+        raw_dst = rule.get('destinations')  # list or null
+        dst_res = rule.get('destinationResource')
+        bidir   = rule.get('bidirectional', False)
+
+        # Skip resource-to-resource rules (sources is null)
+        if raw_src is None:
+            continue
+
+        src_ids = {g['id'] for g in raw_src}
+        dst_ids = {g['id'] for g in (raw_dst or [])}
+        is_src  = bool(src_ids & my_group_ids)
+        is_dst  = bool(dst_ids & my_group_ids)
+
+        if is_src:
+            if raw_dst is not None:
+                # Standard group→group rule
+                entries.append((pol['name'], rule, 'groups', dst_ids, ''))
+            elif dst_res:
+                res_type = dst_res.get('type', '')
+                res_id   = dst_res.get('id', '')
+                if res_type == 'peer':
+                    peer = peer_by_id.get(res_id)
+                    if peer:
+                        entries.append((pol['name'], rule, 'peer', peer, ''))
+                else:
+                    res = resource_by_id.get(res_id, {'name': res_id, 'address': '?', 'type': res_type})
+                    entries.append((pol['name'], rule, 'resource', res, ''))
+
+        # Bidirectional: peer only in destinations → it can also initiate to the source groups
+        if bidir and is_dst and not is_src and raw_dst is not None:
+            entries.append((pol['name'], rule, 'groups', src_ids, '(bidirectional — peer is destination)'))
+
+if not entries:
+    print(f"\n  {YELLOW}No outbound access policies found for this peer.{RESET}")
+    sys.exit(0)
+
+# ── Width-aware table. The only long field (ports) wraps with a hanging indent; ──
+# ── destination name/address sit in fixed columns sized to the terminal width.  ──
+# Reserve room for the widest row: indent(4) + dot+space(2) + name_w + gap(2)
+# + address(18, a /32 CIDR) + gap(2) + resource-type suffix(6) = name_w + 34.
+name_w = max(12, min(34, termw - 34))
+
+def _trunc(s, w):
+    return s if len(s) <= w else s[:max(1, w - 1)] + '…'
+
+def _dot(connected):
+    if connected is True:  return f"{GREEN}●{RESET}"
+    if connected is False: return f"{RED}●{RESET}"
+    return f"{DIM}●{RESET}"
+
+def dest_row(name, addr, connected, indent=4, suffix=''):
+    disp = _trunc(name, name_w)
+    pad  = ' ' * (name_w - len(disp) + 2)
+    tail = f"  {DIM}{suffix}{RESET}" if suffix else ''
+    print(f"{' ' * indent}{_dot(connected)} {disp}{pad}{addr}{tail}")
+
+def ports_row(tokens, indent=4, label='ports'):
+    head_pad = ' ' * indent
+    cont_pad = ' ' * (indent + len(label) + 2)
+    avail    = max(12, termw - len(cont_pad))
+    if not tokens:
+        print(f"{head_pad}{DIM}{label}:{RESET} all")
+        return
+    lines, cur = [], ''
+    for t in tokens:
+        piece = t if not cur else ', ' + t
+        if cur and len(cur) + len(piece) > avail:
+            lines.append(cur); cur = t
+        else:
+            cur += piece
+    if cur:
+        lines.append(cur)
+    print(f"{head_pad}{DIM}{label}:{RESET} {lines[0]}")
+    for ln in lines[1:]:
+        print(f"{cont_pad}{ln}")
+
+def policy_header(pol_name, proto, action, note):
+    left  = pol_name + (f"  {note}" if note else '')
+    right = f"{proto} · {action}"
+    gap   = termw - 2 - len(left) - len(right)
+    if gap < 2: gap = 2
+    print(f"  {BOLD}{left}{RESET}{' ' * gap}{DIM}{right}{RESET}")
+
+print(f"\n  {BOLD}{CYAN}Outbound access — what {my_peer_name} can reach{RESET}")
+
+for pol_name, rule, dest_kind, dest_data, note in entries:
+    proto  = (rule.get('protocol') or 'all').upper()
+    action = rule.get('action', 'accept')
+    ports  = rule.get('ports') or []
+    prs    = rule.get('port_ranges') or []
+    tokens = sorted(ports, key=lambda x: int(x) if x.isdigit() else 0)
+    if prs:
+        tokens += [f"{r['start']}-{r['end']}" for r in prs]
+    if proto == 'ALL':
+        tokens = []                              # all ports
+
+    print(f"  {BOLD}{SEP}{RESET}")
+    policy_header(pol_name, proto, action, note)
+    ports_row(tokens)
+
+    if dest_kind == 'groups':
+        for gid in sorted(dest_data):
+            g = group_by_id.get(gid)
+            if not g:
+                continue
+            members = [p for p in (g.get('peers') or []) if p['id'] != my_peer_id]
+            n = len(members)
+            print(f"    {DIM}group {g['name']} · {n} peer{'' if n == 1 else 's'}{RESET}")
+            for pp in members:
+                d = peer_by_id.get(pp['id'], {})
+                dest_row(pp.get('name', pp['id']), d.get('ip', '?'), d.get('connected'), indent=6)
+            if n == 0:
+                print(f"      {DIM}(no other peers){RESET}")
+    elif dest_kind == 'peer':
+        p = dest_data
+        dest_row(p.get('name', '?'), p.get('ip', '?'), p.get('connected'))
+    elif dest_kind == 'resource':
+        r = dest_data
+        dest_row(r.get('name', '?'), r.get('address', '?'), None, suffix=r.get('type', 'resource'))
+
+print(f"  {BOLD}{SEP}{RESET}")
+print(f"  {GREEN}●{RESET} {DIM}connected{RESET}   {RED}●{RESET} {DIM}offline/unknown{RESET}")
+PYEOF
+
+    local rc=$?
+    rm -rf "$tmpdir"
+    return $rc
+}
+
+# ════════════════════════════════════════════════════════════════════════════════
 #  Menu & dispatch
 # ════════════════════════════════════════════════════════════════════════════════
 show_help() {
@@ -562,8 +879,13 @@ show_help() {
     printf '  netbird-summary -s, --summary    Connected peers + stats only\n'
     printf '  netbird-summary -a, --all        ...also list idle / connecting peers\n'
     printf '  netbird-summary -p, --proxy      ...also list reverse-proxy peers\n'
+    printf '  netbird-summary -A, --access     Show access policy (what this peer can reach)\n'
     printf '  netbird-summary -u, --update     Check for updates and offer to upgrade\n'
     printf '  netbird-summary -h, --help       Show this help\n\n'
+    printf 'Access policy requires a NetBird API key (stored in %s).\n' \
+        "${XDG_CONFIG_HOME:-$HOME/.config}/netbird-summary/api_key"
+    printf 'To reset stored API credentials, delete: %s\n\n' \
+        "${XDG_CONFIG_HOME:-$HOME/.config}/netbird-summary"
     printf 'On interactive launch it also checks GitHub (at most once/day) for newer\n'
     printf 'commits of this script and offers to git pull. Disable with NETBIRD_SUMMARY_NO_SELFCHECK=1.\n'
 }
@@ -574,8 +896,8 @@ run_interactive() {
     show_summary
     local choice
     while true; do
-        printf '\n  %sActions:%s  %s1%s client update   %s2%s idle peers   %s3%s proxy peers   %ss%s summary   %su%s script update   %sq%s quit  ' \
-            "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET"
+        printf '\n  %sActions:%s  %s1%s client update   %s2%s idle peers   %s3%s proxy peers   %s4%s access policy   %ss%s summary   %su%s script update   %sq%s quit  ' \
+            "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET"
         read -rsn1 choice
         printf '%s\n' "$choice"
 
@@ -583,6 +905,7 @@ run_interactive() {
             1)         check_update ;;
             2)         parse_peers && render_idle ;;
             3)         parse_peers && render_proxy ;;
+            4)         show_access_policy ;;
             s|S)       show_summary ;;
             u|U)       self_update_check force ;;
             q|Q|$'\e')  printf '\n'; return 0 ;;
@@ -597,6 +920,7 @@ case "${1:-}" in
     -a|--all)              show_summary && render_idle ;;
     -p|--proxy|proxy)      show_summary && render_proxy ;;
     -s|--summary|summary)  show_summary ;;
+    -A|--access|access)    parse_peers && show_access_policy ;;
     "")
         # Interactive terminal → summary + action prompt; piped → summary only (back-compat)
         if [[ -t 0 && -t 1 ]]; then
