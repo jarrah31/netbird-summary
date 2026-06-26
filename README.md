@@ -6,7 +6,7 @@ Instead of scrolling through verbose multi-line output for each peer, get a sing
 
 ## Example Output
 
-By default the summary lists **connected** peers in detail, then collapses idle/connecting peers into a count and ends with a stats line:
+By default the summary lists **connected, non-proxy** peers in detail, hides idle/connecting and reverse-proxy peers behind a one-line note, and ends with a stats line:
 
 ```
   NetBird Peer Connection Summary
@@ -18,7 +18,7 @@ By default the summary lists **connected** peers in detail, then collapses idle/
   ● cloud-vps                      100.10.0.3       Relayed relay/relay  -                     85.0K/64.0K     12s       85.33ms
   ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-  + 9 idle / connecting peer(s) hidden.  Show them: menu option 3 or netbird-summary --all
+  1 idle/connecting and 9 reverse-proxy peer(s) hidden — see --all / --proxy.
 
   Legend:  ● P2P (direct)   ● Relayed   ● Idle/Connecting
 
@@ -30,23 +30,23 @@ By default the summary lists **connected** peers in detail, then collapses idle/
     -      — not yet negotiated (connecting or relayed with no ICE path)
 
   This peer IP:   100.10.0.5
-  Peers:          12 total · 3 connected (2 P2P, 1 relayed) · 9 idle/connecting
+  Peers:          12 total · 2 connected (1 P2P, 1 relayed) · 1 idle · 9 reverse-proxy (1 up)
   Management:     Connected to https://api.netbird.io:443
   Daemon version: 0.73.2
 ```
 
-Run `netbird-summary --all` (or menu option **3**) to also list the idle/connecting peers with how long they've been in that state:
+Press `2` (or `--all`) to list idle/connecting peers, or `3` (or `--proxy`) for reverse-proxy peers, each with how long they've been in that state:
 
 ```
-  Idle / connecting peers  (9)
-  ────────────────────────────────────────────────────────────────────────────────────────────
-    PEER                                           NETBIRD IP       STATUS       FOR
-  ────────────────────────────────────────────────────────────────────────────────────────────
-  ● proxy-d8lh86r95s1s73dm1big-70-123.netbird.se…  100.124.70.123   Connecting   1h7m
-  ● iphone.netbird.selfhosted                      100.124.232.16   Connecting   1h7m
-  ────────────────────────────────────────────────────────────────────────────────────────────
-  FOR = time since the connection state last changed. A large value means the
-  peer has been unreachable (offline), or it is an on-demand / lazy-connection peer.
+  Reverse-proxy peers  (9)
+  ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+    PEER                                         NETBIRD IP       STATUS       TYPE     REMOTE ENDPOINT       FOR
+  ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ● proxy-d8lh86r95s1s73dm1big-70-123.netbird.… 100.124.70.123   Connecting   -        -                     2h12m
+  ● proxy-d8u48hj95s1s739icub0-204-116.netbird… 100.124.204.116  Connected    Relayed  -                     2h12m
+  ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+  NetBird Reverse Proxy / ingress peers. A new one registers each time the proxy
+  reconnects; usually only the newest is Connected and the others are stale leftovers.
 ```
 
 ## Columns
@@ -64,7 +64,7 @@ Run `netbird-summary --all` (or menu option **3**) to also list the idle/connect
 | **Handshake** | Time since the last WireGuard handshake |
 | **Latency** | Round-trip latency to the peer |
 
-**Idle / connecting peers** (shown with `--all`) list **Peer**, **NetBird IP**, **Status**, and **For** (how long the peer has been in its current state — a large value usually means it's offline).
+**Idle / connecting peers** (shown with `--all`) list **Peer**, **NetBird IP**, **Status**, and **For** (how long the peer has been in its current state — a large value usually means it's offline). **Reverse-proxy peers** (shown with `--proxy`) additionally show **Type** and **Remote Endpoint**.
 
 ## Status Indicators
 
@@ -166,43 +166,54 @@ git pull
 
 If you set up a symlink during installation, you don't need to do anything else — the symlink points at the script in the repo, so it picks up the update automatically.
 
-> This updates the **netbird-summary** script itself. To update the **NetBird client**, use option `2` in the menu (or `netbird-summary --update`).
+> This updates the **netbird-summary** script itself. To update the **NetBird client**, press `1` at the action prompt (or `netbird-summary --update`).
 
 ## Usage
 
-Run with no arguments to get an interactive menu (single keypress — no Enter needed):
+Run with no arguments. It prints the summary immediately, then shows a single-keypress action prompt (no Enter needed):
 
 ```bash
 netbird-summary
 ```
 
 ```
-  NetBird Summary
-  ───────────────
-    1  Peer connection summary
-    2  Check for client updates
-    3  All peers (incl. idle / connecting)
-    q  Quit
+  ...summary table and stats...
 
-  Select an option:
+  Actions:  1 update check   2 idle peers   3 proxy peers   s summary   q quit
 ```
 
-The menu loops after each action until you choose `q`.
+| Key | Action |
+|---|---|
+| `1` | Check for client updates |
+| `2` | List idle / connecting peers |
+| `3` | List reverse-proxy peers |
+| `s` | Re-print the summary |
+| `q` | Quit |
+
+The prompt loops after each action until you press `q`.
 
 Or jump straight to an action with a flag:
 
 ```bash
-netbird-summary -s   # or --summary : show connected peers
-netbird-summary -a   # or --all     : show all peers, incl. idle / connecting
+netbird-summary -s   # or --summary : connected peers + stats only
+netbird-summary -a   # or --all     : also list idle / connecting peers
+netbird-summary -p   # or --proxy   : also list reverse-proxy peers
 netbird-summary -u   # or --update  : check for updates and offer to upgrade
 netbird-summary -h   # or --help    : show usage
 ```
 
-When the output is piped or run non-interactively (e.g. from cron), the menu is skipped and the summary is printed directly — so existing scripts and symlinks keep working.
+When the output is piped or run non-interactively (e.g. from cron), the action prompt is skipped and only the summary is printed — so existing scripts and symlinks keep working.
+
+### Hidden peer categories
+
+By default the summary shows only **connected, non-proxy** peers. Two categories are hidden to keep it clean (a one-line note reports how many):
+
+- **Idle / connecting** peers — list them with `2` or `--all`.
+- **Reverse-proxy peers** — NetBird's [reverse-proxy / ingress](https://docs.netbird.io/manage/reverse-proxy) peers (auto-named `proxy-…`). A fresh one registers each time the proxy reconnects, so these tend to pile up as stale "Connecting" entries with only the newest actually up. List them with `3` or `--proxy`.
 
 ## Checking for updates
 
-Option **2** (or `--update`) compares your installed client version (`netbird version`) against the latest release published on [NetBird's GitHub](https://github.com/netbirdio/netbird/releases) and tells you whether you're up to date.
+Pressing **`1`** (or `--update`) compares your installed client version (`netbird version`) against the latest release published on [NetBird's GitHub](https://github.com/netbirdio/netbird/releases) and tells you whether you're up to date.
 
 If a newer version is available **on Linux**, the script offers to upgrade you. It detects how NetBird was installed and uses the matching method:
 
