@@ -724,10 +724,12 @@ if not my_peer_id:
     sys.exit(1)
 my_peer_name = peer_by_id.get(my_peer_id, {}).get('name', my_ip_bare)
 
-# Groups this peer belongs to
+# Groups this peer belongs to (used for policy matching). "All" is NetBird's
+# system group containing every peer — kept for matching but hidden from display.
 my_group_ids = {g['id'] for g in groups for p in (g.get('peers') or []) if p['id'] == my_peer_id}
 my_group_names = sorted(group_by_id[gid]['name'] for gid in my_group_ids if gid in group_by_id)
-print(f"  {BOLD}Member of groups:{RESET} {', '.join(my_group_names) or '(none)'}")
+shown_groups = [n for n in my_group_names if n != 'All']
+print(f"  {BOLD}Member of groups:{RESET} {', '.join(shown_groups) or '(none)'}")
 
 # A rule "side" is either a list of groups (rule.sources / rule.destinations) or a
 # single resource (rule.sourceResource / rule.destinationResource). Resolve a side
